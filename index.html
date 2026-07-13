@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neural Blocks Lab</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Neural Blocks Lab</h1>
+      <p>블록으로 신경망을 구성하고 실제 학습 변화를 관찰합니다.</p>
+    </div>
+    <div class="run-controls" aria-label="학습 제어">
+      <span class="status-dot" id="statusDot"></span>
+      <span class="status-text" id="trainingStatus">일시정지</span>
+      <button class="primary" id="toggleTraining" type="button">학습 시작</button>
+      <button id="stepTraining" type="button">1 Step</button>
+      <button id="resetTraining" type="button">초기화</button>
+    </div>
+  </header>
+
+  <main class="app-shell">
+    <aside class="left-panel">
+      <section>
+        <div class="section-heading">
+          <h2>모델 패밀리</h2>
+          <span id="engineBadge">Live engine</span>
+        </div>
+        <label>
+          알고리즘
+          <select id="modelFamily">
+            <option value="mlp">MLP / Dense</option>
+            <option value="cnn">CNN</option>
+            <option value="rnn">RNN / LSTM / GRU</option>
+            <option value="gan">GAN</option>
+          </select>
+        </label>
+        <p class="family-description" id="familyDescription"></p>
+        <div class="branch-tabs" id="branchTabs" hidden>
+          <button type="button" data-branch="generator">Generator</button>
+          <button type="button" data-branch="discriminator">Discriminator</button>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <h2>블록 팔레트</h2>
+          <span>클릭 또는 드래그</span>
+        </div>
+        <div class="palette" id="layerPalette"></div>
+      </section>
+
+      <section class="architecture-section">
+        <div class="section-heading">
+          <h2>신경망 구조</h2>
+          <span id="parameterCount">0 parameters</span>
+        </div>
+        <div class="network-stack" id="networkStack" aria-live="polite"></div>
+        <div class="compile-status" id="compileStatus"></div>
+      </section>
+    </aside>
+
+    <section class="workspace">
+      <div class="visual-card decision-card">
+        <div class="card-heading">
+          <div>
+            <h2 id="primaryVisualTitle">실시간 결정경계</h2>
+            <p id="primaryVisualDescription">배경색은 모델 예측, 점은 학습 데이터입니다.</p>
+          </div>
+          <span class="badge" id="datasetBadge">XOR</span>
+        </div>
+        <canvas id="decisionCanvas"></canvas>
+      </div>
+
+      <div class="visual-grid">
+        <div class="visual-card">
+          <div class="card-heading">
+            <div>
+              <h2 id="networkVisualTitle">뉴런 활성화</h2>
+              <p id="networkVisualDescription">결정경계를 클릭해 입력점을 바꿀 수 있습니다.</p>
+            </div>
+            <span class="badge" id="probeValue">x: 0.20, y: -0.20</span>
+          </div>
+          <canvas id="networkCanvas"></canvas>
+        </div>
+
+        <div class="visual-card">
+          <div class="card-heading">
+            <div>
+              <h2 id="lossVisualTitle">학습 곡선</h2>
+              <p id="lossVisualDescription">Train / validation loss</p>
+            </div>
+            <span class="badge" id="epochBadge">Epoch 0</span>
+          </div>
+          <canvas id="lossCanvas"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <aside class="right-panel">
+      <section>
+        <div class="section-heading">
+          <h2>데이터</h2>
+        </div>
+        <label>
+          데이터셋
+          <select id="datasetType">
+            <option value="xor">XOR</option>
+            <option value="circles">원형 분류</option>
+            <option value="linear">선형 분류</option>
+          </select>
+        </label>
+        <label>
+          데이터 개수 <output id="dataCountValue">240</output>
+          <input id="dataCount" type="range" min="80" max="600" step="20" value="240">
+        </label>
+        <label>
+          노이즈 <output id="noiseValue">0.12</output>
+          <input id="noise" type="range" min="0" max="0.4" step="0.01" value="0.12">
+        </label>
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <h2>학습 설정</h2>
+        </div>
+        <label>
+          Optimizer
+          <select id="optimizer">
+            <option value="adam">Adam</option>
+            <option value="sgd">SGD</option>
+            <option value="momentum">Momentum</option>
+            <option value="rmsprop">RMSProp</option>
+          </select>
+        </label>
+        <label>
+          Learning rate <output id="learningRateValue">0.030</output>
+          <input id="learningRate" type="range" min="0.001" max="0.15" step="0.001" value="0.03">
+        </label>
+        <label>
+          Batch size <output id="batchSizeValue">24</output>
+          <input id="batchSize" type="range" min="4" max="96" step="4" value="24">
+        </label>
+        <label>
+          화면당 학습 Step <output id="speedValue">1</output>
+          <input id="trainingSpeed" type="range" min="1" max="20" step="1" value="1">
+        </label>
+        <label>
+          최대 Epoch <output id="maxEpochsValue">400</output>
+          <input id="maxEpochs" type="range" min="20" max="1200" step="20" value="400">
+        </label>
+      </section>
+
+      <section class="metrics-section">
+        <div class="section-heading">
+          <h2>실시간 지표</h2>
+        </div>
+        <div class="metrics-grid">
+          <div>
+            <span id="trainLossLabel">Train loss</span>
+            <strong id="trainLoss">-</strong>
+          </div>
+          <div>
+            <span id="validationLossLabel">Val loss</span>
+            <strong id="validationLoss">-</strong>
+          </div>
+          <div>
+            <span id="trainAccuracyLabel">Train acc</span>
+            <strong id="trainAccuracy">-</strong>
+          </div>
+          <div>
+            <span id="validationAccuracyLabel">Val acc</span>
+            <strong id="validationAccuracy">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="explain-section">
+        <div class="section-heading">
+          <h2>현재 구조 설명</h2>
+        </div>
+        <p id="architectureExplanation"></p>
+      </section>
+    </aside>
+  </main>
+
+  <template id="hiddenLayerTemplate">
+    <article class="network-block hidden-block" draggable="true">
+      <div class="drag-handle" title="드래그해서 순서 변경">::</div>
+      <div class="block-main">
+        <strong>Dense Layer</strong>
+        <div class="block-settings">
+          <label>
+            Neurons
+            <input class="units-input" type="number" min="1" max="32" value="8">
+          </label>
+          <label>
+            Activation
+            <select class="activation-select">
+              <option value="relu">ReLU</option>
+              <option value="tanh">Tanh</option>
+              <option value="sigmoid">Sigmoid</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="block-actions">
+        <button class="move-up" type="button" title="위로 이동">Up</button>
+        <button class="move-down" type="button" title="아래로 이동">Down</button>
+        <button class="remove-layer danger" type="button" title="레이어 삭제">삭제</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="./node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

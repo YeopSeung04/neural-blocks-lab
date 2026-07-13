@@ -1,0 +1,15 @@
+{
+  "name": "neural-blocks-lab",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs",
+    "test:catalog": "node catalog-test.mjs",
+    "test:tf-training": "node tf-training-test.mjs",
+    "test:all": "npm test && npm run test:catalog && npm run test:tf-training",
+    "serve": "python3 -m http.server 8770 --bind 127.0.0.1"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "4.22.0"
+  }
+}
