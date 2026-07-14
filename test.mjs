@@ -73,3 +73,28 @@ assert.equal(uploadedSession.validationPoints.length, 8);
 uploadedSession.step(200);
 assert.ok(Number.isFinite(uploadedSession.metrics().train.loss));
 console.log("uploaded MLP points: custom dataset split and training passed");
+
+const multiFeatureSplits = {
+  train: Array.from({ length: 24 }, (_, index) => ({
+    input: [index / 24, index % 2, Math.sin(index)],
+    target: index >= 12 ? 1 : 0,
+  })),
+  validation: Array.from({ length: 6 }, (_, index) => ({
+    input: [index / 6, index % 2, Math.cos(index)],
+    target: index >= 3 ? 1 : 0,
+  })),
+  test: Array.from({ length: 6 }, (_, index) => ({
+    input: [index / 6, (index + 1) % 2, Math.sin(index / 2)],
+    target: index >= 3 ? 1 : 0,
+  })),
+};
+const multiFeatureSession = new TrainingSession({
+  pointSplits: multiFeatureSplits,
+  inputSize: 3,
+  hiddenLayers: [{ units: 4, activation: "tanh" }],
+  batchSize: 6,
+});
+assert.equal(multiFeatureSession.network.architecture()[0].units, 3);
+assert.equal(multiFeatureSession.testPoints.length, 6);
+assert.ok(Number.isFinite(multiFeatureSession.metrics().test.loss));
+console.log("uploaded MLP: explicit train/validation/test splits and 3 features passed");

@@ -20,6 +20,7 @@ import {
   prepareImageDataset,
   prepareTabularDataset,
   prepareTimeSeriesDataset,
+  profileTabularData,
   suggestColumnMapping,
   summarizeImageFolder,
 } from "./data-pipeline.mjs";
@@ -43,14 +44,28 @@ const elements = {
   fileInputRow: document.getElementById("fileInputRow"),
   folderInputRow: document.getElementById("folderInputRow"),
   dataFileInput: document.getElementById("dataFileInput"),
+  loadSampleData: document.getElementById("loadSampleData"),
   imageFolderInput: document.getElementById("imageFolderInput"),
+  taskType: document.getElementById("taskType"),
+  schemaStep: document.getElementById("schemaStep"),
   columnMapping: document.getElementById("columnMapping"),
-  feature1Row: document.getElementById("feature1Row"),
-  feature2Row: document.getElementById("feature2Row"),
-  featureColumn1: document.getElementById("featureColumn1"),
-  featureColumn2: document.getElementById("featureColumn2"),
+  featureColumnsLabel: document.getElementById("featureColumnsLabel"),
+  featureColumns: document.getElementById("featureColumns"),
   targetColumn: document.getElementById("targetColumn"),
+  timestampRow: document.getElementById("timestampRow"),
+  timestampColumn: document.getElementById("timestampColumn"),
+  visualAxisSettings: document.getElementById("visualAxisSettings"),
+  visualFeatureX: document.getElementById("visualFeatureX"),
+  visualFeatureY: document.getElementById("visualFeatureY"),
   preprocessPipeline: document.getElementById("preprocessPipeline"),
+  splitStrategy: document.getElementById("splitStrategy"),
+  trainRatio: document.getElementById("trainRatio"),
+  validationRatio: document.getElementById("validationRatio"),
+  testRatio: document.getElementById("testRatio"),
+  splitSeed: document.getElementById("splitSeed"),
+  inspectorGrid: document.getElementById("inspectorGrid"),
+  dataWarnings: document.getElementById("dataWarnings"),
+  dataPreview: document.getElementById("dataPreview"),
   applyPreprocessing: document.getElementById("applyPreprocessing"),
   dataSummary: document.getElementById("dataSummary"),
   builtInDataControls: document.getElementById("builtInDataControls"),
@@ -143,6 +158,7 @@ let advancedCompileInfo = null;
 let advancedTrainingSession = null;
 let advancedTrainingPending = false;
 let parsedUpload = null;
+let uploadedDataName = "";
 let selectedImageFiles = [];
 let activeUserDataset = null;
 let weightHitTargets = [];
@@ -153,7 +169,6 @@ let mainThreadLoad = 0;
 const preprocessing = {
   missingStrategy: "drop",
   scaling: "standard",
-  validationRatio: 0.2,
   imageSize: 8,
   pixelScaling: "zeroOne",
   sequenceLength: 12,
@@ -181,13 +196,37 @@ function activeAdvancedLayers() {
   return advancedArchitectures[family];
 }
 
+function currentSplitConfig() {
+  return {
+    strategy: elements.splitStrategy.value,
+    trainRatio: Number(elements.trainRatio.value),
+    validationRatio: Number(elements.validationRatio.value),
+    testRatio: Number(elements.testRatio.value),
+    seed: Number(elements.splitSeed.value),
+  };
+}
+
+function selectedFeatureColumns() {
+  return [...elements.featureColumns.selectedOptions].map((option) => option.value);
+}
+
+function currentMlpInputSize() {
+  return activeUserDataset?.family === "mlp"
+    ? activeUserDataset.inputShape[0]
+    : 2;
+}
+
 function currentConfig() {
   return {
     dataset: elements.datasetType.value,
     count: Number(elements.dataCount.value),
     noise: Number(elements.noise.value),
     points: activeUserDataset?.family === "mlp" ? activeUserDataset.points : null,
-    validationRatio: preprocessing.validationRatio,
+    pointSplits: activeUserDataset?.family === "mlp"
+      ? activeUserDataset.pointSplits
+      : null,
+    inputSize: currentMlpInputSize(),
+    validationRatio: 0.2,
     hiddenLayers: hiddenLayers.map(({ units, activation }) => ({ units, activation })),
     optimizer: elements.optimizer.value,
     learningRate: Number(elements.learningRate.value),
@@ -316,8 +355,16 @@ function renderArchitecture() {
   }
 
   elements.networkStack.replaceChildren();
+  const inputSize = currentMlpInputSize();
+  const featureNames = activeUserDataset?.visualization?.featureNames;
   elements.networkStack.append(
-    createFixedBlock("input", "Input", "2 features: x1, x2"),
+    createFixedBlock(
+      "input",
+      "Input",
+      featureNames?.length
+        ? `${inputSize} features: ${featureNames.slice(0, 4).join(", ")}${featureNames.length > 4 ? "..." : ""}`
+        : "2 features: x1, x2",
+    ),
   );
 
   hiddenLayers.forEach((layer, index) => {
@@ -347,7 +394,7 @@ function renderArchitecture() {
 
 function parameterCount() {
   let total = 0;
-  let previousUnits = 2;
+  let previousUnits = currentMlpInputSize();
   for (const layer of hiddenLayers) {
     total += previousUnits * layer.units + layer.units;
     previousUnits = layer.units;
@@ -429,7 +476,7 @@ function createAdvancedTrainingSession() {
     optimizer: elements.optimizer.value,
     learningRate: Number(elements.learningRate.value),
     batchSize: Number(elements.batchSize.value),
-    validationRatio: preprocessing.validationRatio,
+    validationRatio: 0.2,
   };
   advancedTrainingSession = family === "gan"
     ? new GanTrainingSession(tf, advancedArchitectures.gan, {
@@ -522,7 +569,7 @@ function updateArchitectureDescription() {
     .map((layer) => `${layer.units} ${layer.activation.toUpperCase()}`)
     .join(" -> ");
   elements.architectureExplanation.textContent =
-    `입력 2개가 ${layerText} 은닉층을 통과한 뒤 Sigmoid 출력으로 분류됩니다. ` +
+    `입력 ${currentMlpInputSize()}개가 ${layerText} 은닉층을 통과한 뒤 Sigmoid 출력으로 분류됩니다. ` +
     `블록을 추가하거나 삭제하면 가중치 ${total.toLocaleString()}개가 새로 초기화되고 학습이 처음부터 시작됩니다.`;
 }
 
@@ -660,7 +707,7 @@ function rebuildModel({ preserveRunning = false } = {}) {
   elements.validationLossLabel.textContent = "Val loss";
   elements.trainAccuracyLabel.textContent = "Train acc";
   elements.validationAccuracyLabel.textContent = "Val acc";
-  elements.probeValue.textContent = `x: ${probe[0].toFixed(2)}, y: ${probe[1].toFixed(2)}`;
+  updateProbeLabel();
   renderArchitecture();
   updateControlLabels();
   setAdvancedEngineState();
@@ -810,17 +857,16 @@ function renderPreprocessingPipeline() {
     ));
   }
 
-  elements.preprocessPipeline.append(createPreprocessBlock(
-    "Train / validation split",
-    "validation 데이터는 가중치 업데이트에 사용하지 않음",
-    "validationRatio",
-    [[0.1, "90 / 10"], [0.2, "80 / 20"], [0.25, "75 / 25"], [0.3, "70 / 30"], [0.4, "60 / 40"]],
-    preprocessing.validationRatio,
-  ));
 }
 
-function populateColumnSelect(select, headers, selectedValue) {
+function populateColumnSelect(select, headers, selectedValue, includeEmpty = false) {
   select.replaceChildren();
+  if (includeEmpty) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "사용 안 함";
+    select.append(empty);
+  }
   for (const header of headers) {
     const option = document.createElement("option");
     option.value = header;
@@ -830,16 +876,65 @@ function populateColumnSelect(select, headers, selectedValue) {
   if (headers.includes(selectedValue)) select.value = selectedValue;
 }
 
+function populateFeatureSelect(headers, selectedValues) {
+  elements.featureColumns.replaceChildren();
+  const selected = new Set(selectedValues);
+  for (const header of headers) {
+    const option = document.createElement("option");
+    option.value = header;
+    option.textContent = header;
+    option.selected = selected.has(header);
+    elements.featureColumns.append(option);
+  }
+}
+
+function syncAxisSelectors() {
+  const features = selectedFeatureColumns();
+  const previousX = elements.visualFeatureX.value;
+  const previousY = elements.visualFeatureY.value;
+  populateColumnSelect(
+    elements.visualFeatureX,
+    features,
+    features.includes(previousX) ? previousX : features[0],
+  );
+  populateColumnSelect(
+    elements.visualFeatureY,
+    features,
+    features.includes(previousY) ? previousY : features[1] ?? features[0],
+  );
+  if (
+    features.length > 1 &&
+    elements.visualFeatureX.value === elements.visualFeatureY.value
+  ) {
+    elements.visualFeatureY.value =
+      features.find((feature) => feature !== elements.visualFeatureX.value) ?? features[0];
+  }
+  elements.visualAxisSettings.hidden =
+    elements.dataSource.value !== "csv" || features.length < 2;
+}
+
 function updateColumnMapping(parsed) {
   const mapping = suggestColumnMapping(parsed.headers);
-  populateColumnSelect(elements.featureColumn1, parsed.headers, mapping.signalColumn);
-  populateColumnSelect(
-    elements.featureColumn2,
-    parsed.headers,
-    mapping.featureColumns[1] ?? mapping.featureColumns[0],
-  );
+  const profile = profileTabularData(parsed);
+  const numericColumns = profile.columns
+    .filter((column) => column.numeric)
+    .map((column) => column.column)
+    .filter((column) =>
+      column !== mapping.targetColumn && column !== mapping.timestampColumn);
+  const suggestedFeatures = numericColumns.length
+    ? numericColumns.slice(0, 16)
+    : mapping.featureColumns.slice(0, 2);
+  populateFeatureSelect(parsed.headers, suggestedFeatures);
   populateColumnSelect(elements.targetColumn, parsed.headers, mapping.targetColumn);
+  populateColumnSelect(
+    elements.timestampColumn,
+    parsed.headers,
+    mapping.timestampColumn,
+    true,
+  );
   elements.columnMapping.hidden = false;
+  syncAxisSelectors();
+  renderDatasetInspector();
 }
 
 function renderDataSourceControls() {
@@ -848,33 +943,226 @@ function renderDataSourceControls() {
   elements.uploadControls.hidden = builtIn;
   elements.builtInDataControls.hidden = !builtIn;
   elements.fileInputRow.hidden = builtIn || source === "imageFolder";
+  elements.loadSampleData.hidden = builtIn || source === "imageFolder";
   elements.folderInputRow.hidden = source !== "imageFolder";
   elements.columnMapping.hidden =
     source === "imageFolder" || !parsedUpload;
-  elements.feature2Row.hidden = source === "timeSeries";
+  elements.featureColumnsLabel.textContent =
+    source === "timeSeries" ? "Input Signals" : "Input Features";
+  elements.timestampRow.hidden = source !== "timeSeries";
+  elements.visualAxisSettings.hidden =
+    source !== "csv" || !parsedUpload || selectedFeatureColumns().length < 2;
   elements.dataPrivacyBadge.textContent = builtIn ? "내장 데이터" : "로컬 브라우저 처리";
   elements.dataFileInput.accept = source === "timeSeries"
     ? ".csv,.tsv,text/csv,text/tab-separated-values"
     : ".csv,.tsv,text/csv,text/tab-separated-values";
+  if (source === "timeSeries") {
+    elements.splitStrategy.value = "chronological";
+    elements.splitStrategy.disabled = true;
+  } else {
+    if (elements.splitStrategy.value === "chronological") {
+      elements.splitStrategy.value = "stratified";
+    }
+    elements.splitStrategy.disabled = false;
+  }
   renderPreprocessingPipeline();
+  renderDatasetInspector();
 }
 
 function resetUploadedData() {
   parsedUpload = null;
+  uploadedDataName = "";
   selectedImageFiles = [];
   activeUserDataset = null;
   elements.dataFileInput.value = "";
   elements.imageFolderInput.value = "";
   elements.applyPreprocessing.disabled = true;
+  elements.inspectorGrid.replaceChildren();
+  elements.dataWarnings.replaceChildren();
+  elements.dataPreview.replaceChildren();
   setDataSummary("파일을 선택하세요.");
 }
 
+function addInspectorItem(label, value) {
+  const item = document.createElement("div");
+  item.className = "inspector-item";
+  const labelElement = document.createElement("span");
+  labelElement.textContent = label;
+  const valueElement = document.createElement("strong");
+  valueElement.textContent = value;
+  item.append(labelElement, valueElement);
+  elements.inspectorGrid.append(item);
+}
+
+function addDataWarning(message, ok = false) {
+  const warning = document.createElement("div");
+  warning.className = `data-warning${ok ? " ok" : ""}`;
+  warning.textContent = message;
+  elements.dataWarnings.append(warning);
+}
+
+function renderDataPreview(headers, rows) {
+  elements.dataPreview.replaceChildren();
+  if (!headers.length || !rows.length) return;
+  const table = document.createElement("table");
+  table.className = "preview-table";
+  const headerRow = document.createElement("tr");
+  for (const header of headers) {
+    const cell = document.createElement("th");
+    cell.textContent = header;
+    headerRow.append(cell);
+  }
+  const head = document.createElement("thead");
+  head.append(headerRow);
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tableRow = document.createElement("tr");
+    for (const header of headers) {
+      const cell = document.createElement("td");
+      cell.textContent = String(row[header] ?? "");
+      tableRow.append(cell);
+    }
+    body.append(tableRow);
+  }
+  table.append(head, body);
+  elements.dataPreview.append(table);
+}
+
+function splitRatioIsValid() {
+  const split = currentSplitConfig();
+  const total = split.trainRatio + split.validationRatio + split.testRatio;
+  return (
+    split.trainRatio > 0 &&
+    split.validationRatio >= 0 &&
+    split.testRatio >= 0 &&
+    Math.abs(total - 1) < 1e-6
+  );
+}
+
+function renderDatasetInspector() {
+  elements.inspectorGrid.replaceChildren();
+  elements.dataWarnings.replaceChildren();
+  elements.dataPreview.replaceChildren();
+  const source = elements.dataSource.value;
+  if (source === "builtIn") return;
+
+  let valid = splitRatioIsValid();
+  if (!valid) addDataWarning("Train + Validation + Test 비율의 합은 1이어야 합니다.");
+  else addDataWarning("분할 비율과 Seed가 고정되어 재현 가능한 실험입니다.", true);
+
+  if (source === "imageFolder") {
+    if (!selectedImageFiles.length) {
+      addDataWarning("이미지 폴더를 선택하세요.");
+      elements.applyPreprocessing.disabled = true;
+      return;
+    }
+    try {
+      const summary = summarizeImageFolder(selectedImageFiles);
+      addInspectorItem("Images", String(summary.imageCount));
+      addInspectorItem("Classes", String(summary.classes.length));
+      addInspectorItem("Tensor", `${preprocessing.imageSize}×${preprocessing.imageSize}×1`);
+      addInspectorItem(
+        "Split",
+        `${Math.round(Number(elements.trainRatio.value) * 100)}/` +
+          `${Math.round(Number(elements.validationRatio.value) * 100)}/` +
+          `${Math.round(Number(elements.testRatio.value) * 100)}`,
+      );
+      if (summary.classes.length !== 2) {
+        valid = false;
+        addDataWarning(`현재 이진 분류는 클래스가 2개여야 합니다. 현재 ${summary.classes.length}개입니다.`);
+      }
+      const counts = Object.values(summary.classCounts);
+      if (counts.length === 2 && Math.max(...counts) / Math.max(1, Math.min(...counts)) > 3) {
+        addDataWarning("클래스 데이터 수 차이가 3배 이상입니다. 불균형 학습을 확인하세요.");
+      }
+      const rows = selectedImageFiles.slice(0, 8).map((file) => ({
+        class: file.webkitRelativePath?.split("/")[1] ?? "-",
+        file: file.name,
+      }));
+      renderDataPreview(["class", "file"], rows);
+    } catch (error) {
+      valid = false;
+      addDataWarning(error.message);
+    }
+    elements.applyPreprocessing.disabled = !valid;
+    return;
+  }
+
+  if (!parsedUpload) {
+    addDataWarning("CSV 또는 TSV 파일을 선택하세요.");
+    elements.applyPreprocessing.disabled = true;
+    return;
+  }
+  const features = selectedFeatureColumns();
+  const target = elements.targetColumn.value;
+  const minimumFeatures = source === "timeSeries" ? 1 : 2;
+  if (features.length < minimumFeatures) {
+    valid = false;
+    addDataWarning(
+      source === "timeSeries"
+        ? "Signal 열을 1개 이상 선택하세요."
+        : "결정경계와 학습을 위해 Feature 열을 2개 이상 선택하세요.",
+    );
+  }
+  if (features.includes(target)) {
+    valid = false;
+    addDataWarning("Target 열은 Input Feature로 동시에 사용할 수 없습니다.");
+  }
+  const profile = profileTabularData(parsedUpload, {
+    columns: features,
+    targetColumn: target,
+  });
+  const classes = Object.entries(profile.classCounts);
+  const missing = profile.columns.reduce((sum, column) => sum + column.missing, 0);
+  addInspectorItem("Rows", String(profile.rowCount));
+  addInspectorItem(source === "timeSeries" ? "Signals" : "Features", String(features.length));
+  addInspectorItem("Classes", String(classes.length));
+  addInspectorItem("Missing", String(missing));
+  addInspectorItem(
+    "Tensor",
+    source === "timeSeries"
+      ? `${preprocessing.sequenceLength}×${features.length}`
+      : `[${features.length}]`,
+  );
+  addInspectorItem(
+    "Split",
+    `${Math.round(Number(elements.trainRatio.value) * 100)}/` +
+      `${Math.round(Number(elements.validationRatio.value) * 100)}/` +
+      `${Math.round(Number(elements.testRatio.value) * 100)}`,
+  );
+  if (classes.length !== 2) {
+    valid = false;
+    addDataWarning(`현재 이진 분류는 Target 클래스가 2개여야 합니다. 현재 ${classes.length}개입니다.`);
+  }
+  if (missing > 0) {
+    addDataWarning(`${missing}개 결측 셀이 있습니다. 선택한 결측치 처리 전략이 적용됩니다.`);
+  }
+  const classCounts = classes.map(([, count]) => count);
+  if (
+    classCounts.length === 2 &&
+    Math.max(...classCounts) / Math.max(1, Math.min(...classCounts)) > 3
+  ) {
+    addDataWarning("Target 클래스 비율 차이가 3배 이상입니다.");
+  }
+  if (source === "timeSeries") {
+    addDataWarning("시계열은 행을 섞지 않고 Timestamp 또는 현재 행 순서로 분할합니다.", true);
+  } else {
+    addDataWarning("결측치 대체와 Scaling 통계는 Train split에서만 계산됩니다.", true);
+  }
+  const previewHeaders = [...new Set([...features, target])].slice(0, 10);
+  renderDataPreview(previewHeaders, profile.preview);
+  elements.applyPreprocessing.disabled = !valid;
+}
+
 function describePreparedDataset(dataset) {
+  const counts = dataset.summary.splitCounts;
+  const splitText = `train ${counts.train} · val ${counts.validation} · test ${counts.test}`;
   if (dataset.family === "mlp") {
     return [
       `전처리 완료: ${dataset.points.length} rows`,
       `features: ${dataset.summary.features.join(", ")}`,
       `classes: ${dataset.summary.classes.join(" / ")}`,
+      splitText,
       `scaling: ${dataset.summary.scaling}`,
     ].join("\n");
   }
@@ -883,14 +1171,16 @@ function describePreparedDataset(dataset) {
       `전처리 완료: ${dataset.datasetData.count} images`,
       `shape: [${dataset.inputShape.join(", ")}]`,
       `classes: ${dataset.summary.classes.join(" / ")}`,
+      splitText,
       `pixels: ${dataset.summary.pixelScaling}`,
     ].join("\n");
   }
   return [
     `전처리 완료: ${dataset.datasetData.count} windows`,
     `shape: [${dataset.inputShape.join(", ")}]`,
-    `signal: ${dataset.summary.signal}`,
+    `signals: ${dataset.summary.signals.join(", ")}`,
     `classes: ${dataset.summary.classes.join(" / ")}`,
+    splitText,
   ].join("\n");
 }
 
@@ -907,31 +1197,36 @@ async function applyUploadedDataset() {
   try {
     let prepared;
     let name;
+    const split = currentSplitConfig();
     if (source === "csv") {
+      const features = selectedFeatureColumns();
       prepared = prepareTabularDataset(parsedUpload, {
-        featureColumns: [
-          elements.featureColumn1.value,
-          elements.featureColumn2.value,
-        ],
+        featureColumns: features,
         targetColumn: elements.targetColumn.value,
         missingStrategy: preprocessing.missingStrategy,
         scaling: preprocessing.scaling,
+        split,
       });
-      name = elements.dataFileInput.files[0]?.name ?? "uploaded.csv";
+      prepared.visualization.xFeatureIndex = features.indexOf(elements.visualFeatureX.value);
+      prepared.visualization.yFeatureIndex = features.indexOf(elements.visualFeatureY.value);
+      name = uploadedDataName || elements.dataFileInput.files[0]?.name || "uploaded.csv";
     } else if (source === "timeSeries") {
       prepared = prepareTimeSeriesDataset(parsedUpload, {
-        signalColumn: elements.featureColumn1.value,
+        signalColumns: selectedFeatureColumns(),
         targetColumn: elements.targetColumn.value,
+        timestampColumn: elements.timestampColumn.value,
         sequenceLength: preprocessing.sequenceLength,
         stride: preprocessing.stride,
         missingStrategy: preprocessing.missingStrategy,
         scaling: preprocessing.scaling,
+        split: { ...split, strategy: "chronological" },
       });
-      name = elements.dataFileInput.files[0]?.name ?? "timeseries.csv";
+      name = uploadedDataName || elements.dataFileInput.files[0]?.name || "timeseries.csv";
     } else if (source === "imageFolder") {
       prepared = await prepareImageDataset(selectedImageFiles, {
         imageSize: preprocessing.imageSize,
         pixelScaling: preprocessing.pixelScaling,
+        split,
       });
       name = selectedImageFiles[0]?.webkitRelativePath?.split("/")[0] ?? "image folder";
     } else {
@@ -942,6 +1237,22 @@ async function applyUploadedDataset() {
       name,
       source,
     };
+    if (prepared.family === "mlp") {
+      const ranges = prepared.visualization.featureNames.map((_, featureIndex) => {
+        const values = prepared.points.map((point) => point.input[featureIndex]);
+        const minimum = Math.min(...values);
+        const maximum = Math.max(...values);
+        const padding = Math.max(0.1, (maximum - minimum) * 0.08);
+        return [minimum - padding, maximum + padding];
+      });
+      activeUserDataset.visualization.ranges = ranges;
+      const xRange = ranges[activeUserDataset.visualization.xFeatureIndex];
+      const yRange = ranges[activeUserDataset.visualization.yFeatureIndex];
+      probe = [
+        (xRange[0] + xRange[1]) / 2,
+        (yRange[0] + yRange[1]) / 2,
+      ];
+    }
     if (elements.modelFamily.value !== prepared.family) {
       elements.modelFamily.value = prepared.family;
       elements.modelFamily.dispatchEvent(new Event("change"));
@@ -954,8 +1265,7 @@ async function applyUploadedDataset() {
     setDataSummary(`전처리 오류: ${error.message}`, "invalid");
     rebuildForCurrentFamily();
   } finally {
-    elements.applyPreprocessing.disabled =
-      source === "imageFolder" ? !selectedImageFiles.length : !parsedUpload;
+    renderDatasetInspector();
   }
 }
 
@@ -982,18 +1292,52 @@ function probabilityColor(probability) {
     `${Math.round(low[2] * (1 - p) + high[2] * p)})`;
 }
 
+function activeMlpVisualization() {
+  if (activeUserDataset?.family === "mlp") {
+    return activeUserDataset.visualization;
+  }
+  return {
+    featureNames: ["x1", "x2"],
+    xFeatureIndex: 0,
+    yFeatureIndex: 1,
+    baseline: [0, 0],
+    ranges: [[-1.2, 1.2], [-1.2, 1.2]],
+  };
+}
+
+function modelInputFromVisual([x, y]) {
+  const visualization = activeMlpVisualization();
+  const input = visualization.baseline.slice();
+  input[visualization.xFeatureIndex] = x;
+  input[visualization.yFeatureIndex] = y;
+  return input;
+}
+
+function updateProbeLabel() {
+  const visualization = activeMlpVisualization();
+  const xName = visualization.featureNames[visualization.xFeatureIndex] ?? "x";
+  const yName = visualization.featureNames[visualization.yFeatureIndex] ?? "y";
+  elements.probeValue.textContent =
+    `${xName}: ${probe[0].toFixed(2)}, ${yName}: ${probe[1].toFixed(2)}`;
+}
+
 function drawDecisionBoundary() {
   const { context, width, height } = resizeCanvas(elements.decisionCanvas);
   context.clearRect(0, 0, width, height);
+  const visualization = activeMlpVisualization();
+  const xRange = visualization.ranges[visualization.xFeatureIndex] ?? [-1.2, 1.2];
+  const yRange = visualization.ranges[visualization.yFeatureIndex] ?? [-1.2, 1.2];
+  const xSpan = Math.max(1e-8, xRange[1] - xRange[0]);
+  const ySpan = Math.max(1e-8, yRange[1] - yRange[0]);
 
   const grid = Math.max(34, Math.min(64, Math.floor(width / 10)));
   const cellWidth = width / grid;
   const cellHeight = height / grid;
   for (let yIndex = 0; yIndex < grid; yIndex += 1) {
-    const y = 1.2 - (yIndex + 0.5) / grid * 2.4;
+    const y = yRange[1] - (yIndex + 0.5) / grid * ySpan;
     for (let xIndex = 0; xIndex < grid; xIndex += 1) {
-      const x = -1.2 + (xIndex + 0.5) / grid * 2.4;
-      const probability = session.network.predict([x, y]);
+      const x = xRange[0] + (xIndex + 0.5) / grid * xSpan;
+      const probability = session.network.predict(modelInputFromVisual([x, y]));
       context.fillStyle = probabilityColor(probability);
       context.fillRect(
         xIndex * cellWidth,
@@ -1005,29 +1349,41 @@ function drawDecisionBoundary() {
   }
 
   const toCanvas = ([x, y]) => ({
-    x: (x + 1.2) / 2.4 * width,
-    y: (1.2 - y) / 2.4 * height,
+    x: (x - xRange[0]) / xSpan * width,
+    y: (yRange[1] - y) / ySpan * height,
   });
 
   context.strokeStyle = "rgba(255,255,255,0.2)";
   context.lineWidth = 1;
-  const origin = toCanvas([0, 0]);
-  context.beginPath();
-  context.moveTo(origin.x, 0);
-  context.lineTo(origin.x, height);
-  context.moveTo(0, origin.y);
-  context.lineTo(width, origin.y);
-  context.stroke();
+  if (xRange[0] <= 0 && xRange[1] >= 0) {
+    const origin = toCanvas([0, yRange[0]]);
+    context.beginPath();
+    context.moveTo(origin.x, 0);
+    context.lineTo(origin.x, height);
+    context.stroke();
+  }
+  if (yRange[0] <= 0 && yRange[1] >= 0) {
+    const origin = toCanvas([xRange[0], 0]);
+    context.beginPath();
+    context.moveTo(0, origin.y);
+    context.lineTo(width, origin.y);
+    context.stroke();
+  }
 
   const validationSet = new Set(session.validationPoints);
+  const testSet = new Set(session.testPoints);
   for (const point of session.points) {
-    const position = toCanvas(point.input);
+    const position = toCanvas([
+      point.input[visualization.xFeatureIndex],
+      point.input[visualization.yFeatureIndex],
+    ]);
+    const heldOut = validationSet.has(point) || testSet.has(point);
     context.beginPath();
-    context.arc(position.x, position.y, validationSet.has(point) ? 4.5 : 3.5, 0, Math.PI * 2);
+    context.arc(position.x, position.y, heldOut ? 4.5 : 3.5, 0, Math.PI * 2);
     context.fillStyle = point.target === 1 ? "#ffbf75" : "#82c5ff";
     context.fill();
-    if (validationSet.has(point)) {
-      context.strokeStyle = "#ffffff";
+    if (heldOut) {
+      context.strokeStyle = testSet.has(point) ? "#f7d66d" : "#ffffff";
       context.lineWidth = 1.2;
       context.stroke();
     }
@@ -1043,6 +1399,23 @@ function drawDecisionBoundary() {
   context.moveTo(probePosition.x, probePosition.y - 12);
   context.lineTo(probePosition.x, probePosition.y + 12);
   context.stroke();
+
+  context.fillStyle = "#a7b4c2";
+  context.font = "11px system-ui";
+  context.fillText(
+    visualization.featureNames[visualization.xFeatureIndex] ?? "x",
+    Math.max(10, width - 80),
+    height - 10,
+  );
+  context.save();
+  context.translate(12, 82);
+  context.rotate(-Math.PI / 2);
+  context.fillText(
+    visualization.featureNames[visualization.yFeatureIndex] ?? "y",
+    0,
+    0,
+  );
+  context.restore();
 }
 
 function activationColor(value, activation) {
@@ -1107,10 +1480,11 @@ function drawNetwork() {
   context.fillRect(0, 0, width, height);
 
   const architecture = session.network.architecture();
-  const snapshot = session.network.activationSnapshot(probe);
+  const modelInput = modelInputFromVisual(probe);
+  const snapshot = session.network.activationSnapshot(modelInput);
   weightHitTargets = [];
   const columns = architecture.map((layer, layerIndex) => {
-    const values = layerIndex === 0 ? probe : snapshot.layers[layerIndex - 1];
+    const values = layerIndex === 0 ? modelInput : snapshot.layers[layerIndex - 1];
     const indices = displayedIndices(layer.units);
     return {
       ...layer,
@@ -1447,7 +1821,7 @@ function drawAdvancedVisuals() {
     : "Train / validation loss";
   elements.probeValue.textContent = elements.modelFamily.value === "gan"
     ? activeGanBranch
-    : formatShape(MODEL_FAMILIES[family].inputShape);
+    : formatShape(advancedInputShape());
   const trainingMetrics = advancedTrainingSession?.metrics?.();
   elements.epochBadge.textContent = advancedCompileInfo?.error
     ? "Invalid"
@@ -1820,6 +2194,16 @@ function setupArchitectureEvents() {
   });
 }
 
+function loadTextDataset(name, text) {
+  parsedUpload = parseCsvText(text);
+  uploadedDataName = name;
+  updateColumnMapping(parsedUpload);
+  renderDataSourceControls();
+  setDataSummary(
+    `${name}\n${parsedUpload.rows.length} rows · ${parsedUpload.headers.length} columns`,
+  );
+}
+
 function setupDataControls() {
   elements.dataSource.addEventListener("change", () => {
     running = false;
@@ -1832,22 +2216,35 @@ function setupDataControls() {
     const file = elements.dataFileInput.files[0];
     if (!file) {
       parsedUpload = null;
+      uploadedDataName = "";
       elements.applyPreprocessing.disabled = true;
       setDataSummary("파일을 선택하세요.");
       return;
     }
     try {
-      parsedUpload = parseCsvText(await file.text());
-      updateColumnMapping(parsedUpload);
-      renderDataSourceControls();
-      elements.applyPreprocessing.disabled = false;
-      setDataSummary(
-        `${file.name}\n${parsedUpload.rows.length} rows · ${parsedUpload.headers.length} columns`,
-      );
+      loadTextDataset(file.name, await file.text());
     } catch (error) {
       parsedUpload = null;
+      uploadedDataName = "";
       elements.applyPreprocessing.disabled = true;
       setDataSummary(`파일 오류: ${error.message}`, "invalid");
+    }
+  });
+
+  elements.loadSampleData.addEventListener("click", async () => {
+    const source = elements.dataSource.value;
+    const sample = source === "timeSeries"
+      ? "./samples/time_series_binary.csv"
+      : "./samples/tabular_binary.csv";
+    try {
+      const response = await fetch(sample, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      loadTextDataset(sample.split("/").pop(), await response.text());
+    } catch (error) {
+      parsedUpload = null;
+      uploadedDataName = "";
+      renderDatasetInspector();
+      setDataSummary(`샘플 오류: ${error.message}`, "invalid");
     }
   });
 
@@ -1855,10 +2252,10 @@ function setupDataControls() {
     selectedImageFiles = [...elements.imageFolderInput.files];
     try {
       const summary = summarizeImageFolder(selectedImageFiles);
-      elements.applyPreprocessing.disabled = summary.imageCount < 1;
       setDataSummary(
         `${summary.imageCount} images\nclasses: ${summary.classes.join(" / ") || "확인 불가"}`,
       );
+      renderDatasetInspector();
     } catch (error) {
       selectedImageFiles = [];
       elements.applyPreprocessing.disabled = true;
@@ -1870,7 +2267,6 @@ function setupDataControls() {
     const setting = event.target.dataset.preprocessSetting;
     if (!setting) return;
     const numericSettings = new Set([
-      "validationRatio",
       "imageSize",
       "sequenceLength",
       "stride",
@@ -1878,18 +2274,42 @@ function setupDataControls() {
     preprocessing[setting] = numericSettings.has(setting)
       ? Number(event.target.value)
       : event.target.value;
-    elements.applyPreprocessing.disabled =
-      elements.dataSource.value === "imageFolder"
-        ? !selectedImageFiles.length
-        : !parsedUpload;
+    renderDatasetInspector();
     setDataSummary("전처리 설정이 변경되었습니다. 다시 적용하세요.");
   });
 
-  elements.columnMapping.addEventListener("change", () => {
-    elements.applyPreprocessing.disabled = !parsedUpload;
+  elements.columnMapping.addEventListener("change", (event) => {
+    if (event.target === elements.targetColumn) {
+      for (const option of elements.featureColumns.options) {
+        if (option.value === elements.targetColumn.value) option.selected = false;
+      }
+    }
+    syncAxisSelectors();
+    renderDatasetInspector();
     setDataSummary("컬럼 매핑이 변경되었습니다. 전처리를 적용하세요.");
   });
 
+  elements.visualAxisSettings.addEventListener("change", () => {
+    syncAxisSelectors();
+    setDataSummary("결정경계 표시 축이 변경되었습니다. 다시 적용하세요.");
+  });
+
+  for (const control of [
+    elements.splitStrategy,
+    elements.trainRatio,
+    elements.validationRatio,
+    elements.testRatio,
+    elements.splitSeed,
+  ]) {
+    const handleSplitChange = () => {
+      renderDatasetInspector();
+      setDataSummary("데이터 분할 설정이 변경되었습니다. 다시 적용하세요.");
+    };
+    control.addEventListener("input", handleSplitChange);
+    control.addEventListener("change", handleSplitChange);
+  }
+
+  elements.taskType.addEventListener("change", renderDatasetInspector);
   elements.applyPreprocessing.addEventListener("click", applyUploadedDataset);
 }
 
@@ -1989,11 +2409,14 @@ function setupControls() {
   elements.decisionCanvas.addEventListener("click", (event) => {
     if (isAdvancedFamily()) return;
     const rect = elements.decisionCanvas.getBoundingClientRect();
+    const visualization = activeMlpVisualization();
+    const xRange = visualization.ranges[visualization.xFeatureIndex] ?? [-1.2, 1.2];
+    const yRange = visualization.ranges[visualization.yFeatureIndex] ?? [-1.2, 1.2];
     probe = [
-      -1.2 + (event.clientX - rect.left) / rect.width * 2.4,
-      1.2 - (event.clientY - rect.top) / rect.height * 2.4,
+      xRange[0] + (event.clientX - rect.left) / rect.width * (xRange[1] - xRange[0]),
+      yRange[1] - (event.clientY - rect.top) / rect.height * (yRange[1] - yRange[0]),
     ];
-    elements.probeValue.textContent = `x: ${probe[0].toFixed(2)}, y: ${probe[1].toFixed(2)}`;
+    updateProbeLabel();
     drawDecisionBoundary();
     drawNetwork();
   });

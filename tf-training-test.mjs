@@ -27,22 +27,33 @@ for (const family of ["cnn", "rnn"]) {
 
 const customSequenceCount = 32;
 const customSequenceLength = 8;
-const customSequenceXs = new Float32Array(customSequenceCount * customSequenceLength);
-const customSequenceYs = new Float32Array(customSequenceCount);
-for (let sample = 0; sample < customSequenceCount; sample += 1) {
-  const label = sample % 2;
-  customSequenceYs[sample] = label;
-  for (let step = 0; step < customSequenceLength; step += 1) {
-    customSequenceXs[sample * customSequenceLength + step] =
-      label ? step / customSequenceLength : 1 - step / customSequenceLength;
+function makeSequenceSplit(count, sampleOffset) {
+  const xs = new Float32Array(count * customSequenceLength);
+  const ys = new Float32Array(count);
+  for (let sample = 0; sample < count; sample += 1) {
+    const label = (sample + sampleOffset) % 2;
+    ys[sample] = label;
+    for (let step = 0; step < customSequenceLength; step += 1) {
+      xs[sample * customSequenceLength + step] =
+        label ? step / customSequenceLength : 1 - step / customSequenceLength;
+    }
   }
+  return {
+    count,
+    inputShape: [customSequenceLength, 1],
+    xs,
+    ys,
+  };
 }
 const customRnn = new TfClassifierSession(tf, "rnn", cloneTemplate("rnn"), {
   datasetData: {
     count: customSequenceCount,
     inputShape: [customSequenceLength, 1],
-    xs: customSequenceXs,
-    ys: customSequenceYs,
+    splits: {
+      train: makeSequenceSplit(20, 0),
+      validation: makeSequenceSplit(6, 20),
+      test: makeSequenceSplit(6, 26),
+    },
   },
   inputShape: [customSequenceLength, 1],
   validationRatio: 0.25,
@@ -51,8 +62,9 @@ const customRnn = new TfClassifierSession(tf, "rnn", cloneTemplate("rnn"), {
 await customRnn.step(1);
 assert.ok(Number.isFinite(customRnn.metrics().trainLoss));
 assert.deepEqual(customRnn.model.inputs[0].shape, [null, customSequenceLength, 1]);
+assert.deepEqual(customRnn.data.testXs.shape, [6, customSequenceLength, 1]);
 customRnn.dispose();
-console.log("rnn: uploaded tensor dataset and dynamic input shape passed");
+console.log("rnn: explicit chronological splits and dynamic input shape passed");
 
 const deferredDisposeSession = new TfClassifierSession(
   tf,

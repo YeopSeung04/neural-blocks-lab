@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Neural Blocks Lab</title>
-  <link rel="stylesheet" href="./styles.css?v=20260714-2">
+  <link rel="stylesheet" href="./styles.css?v=20260715-2">
 </head>
 <body>
   <header class="topbar">
@@ -116,31 +116,127 @@
           </select>
         </label>
         <div class="upload-controls" id="uploadControls" hidden>
-          <label id="fileInputRow">
-            파일 선택
-            <input id="dataFileInput" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values">
-          </label>
-          <label id="folderInputRow" hidden>
-            이미지 폴더 선택
-            <input id="imageFolderInput" type="file" accept="image/*" webkitdirectory directory multiple>
-          </label>
-          <div class="column-mapping" id="columnMapping" hidden>
-            <label id="feature1Row">
-              Feature X / Signal
-              <select id="featureColumn1"></select>
+          <div class="wizard-progress" aria-label="Dataset Setup 단계">
+            <span class="active">1 Source</span>
+            <span>2 Schema</span>
+            <span>3 Process</span>
+            <span>4 Split</span>
+            <span>5 Inspect</span>
+          </div>
+
+          <section class="wizard-step">
+            <div class="wizard-step-heading">
+              <b>1</b>
+              <div><strong>데이터와 문제 유형</strong><small>학습할 파일과 목표를 지정</small></div>
+            </div>
+            <label id="fileInputRow">
+              파일 선택
+              <input id="dataFileInput" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values">
             </label>
-            <label id="feature2Row">
-              Feature Y
-              <select id="featureColumn2"></select>
+            <button id="loadSampleData" type="button">샘플 데이터 불러오기</button>
+            <label id="folderInputRow" hidden>
+              이미지 폴더 선택
+              <input id="imageFolderInput" type="file" accept="image/*" webkitdirectory directory multiple>
             </label>
             <label>
-              Target / Label
-              <select id="targetColumn"></select>
+              문제 유형
+              <select id="taskType">
+                <option value="binaryClassification">이진 분류</option>
+                <option value="multiclassClassification" disabled>다중 분류 · 다음 버전</option>
+                <option value="regression" disabled>회귀 · 다음 버전</option>
+              </select>
             </label>
-          </div>
-          <div class="preprocess-pipeline" id="preprocessPipeline"></div>
+          </section>
+
+          <section class="wizard-step" id="schemaStep">
+            <div class="wizard-step-heading">
+              <b>2</b>
+              <div><strong>입력 스키마</strong><small>Feature와 정답 열을 분리</small></div>
+            </div>
+            <div class="column-mapping" id="columnMapping" hidden>
+              <label class="wide-field">
+                <span id="featureColumnsLabel">Input Features</span>
+                <select id="featureColumns" multiple size="5"></select>
+                <small>여러 열을 선택할 수 있습니다.</small>
+              </label>
+              <label>
+                Target / Label
+                <select id="targetColumn"></select>
+              </label>
+              <label id="timestampRow" hidden>
+                Timestamp
+                <select id="timestampColumn"></select>
+              </label>
+            </div>
+            <div class="visual-axis-settings" id="visualAxisSettings" hidden>
+              <span>결정경계 표시 축</span>
+              <label>
+                X axis
+                <select id="visualFeatureX"></select>
+              </label>
+              <label>
+                Y axis
+                <select id="visualFeatureY"></select>
+              </label>
+              <small>나머지 Feature는 Train 중앙값으로 고정합니다.</small>
+            </div>
+          </section>
+
+          <section class="wizard-step">
+            <div class="wizard-step-heading">
+              <b>3</b>
+              <div><strong>전처리</strong><small>Train 기준으로 변환 통계를 계산</small></div>
+            </div>
+            <div class="preprocess-pipeline" id="preprocessPipeline"></div>
+          </section>
+
+          <section class="wizard-step">
+            <div class="wizard-step-heading">
+              <b>4</b>
+              <div><strong>데이터 분할</strong><small>학습·검증·최종 평가 데이터 분리</small></div>
+            </div>
+            <div class="split-settings">
+              <label>
+                Split strategy
+                <select id="splitStrategy">
+                  <option value="stratified">Stratified random</option>
+                  <option value="random">Random</option>
+                  <option value="chronological">Chronological</option>
+                </select>
+              </label>
+              <label>
+                Train
+                <input id="trainRatio" type="number" min="0.5" max="0.9" step="0.05" value="0.70">
+              </label>
+              <label>
+                Validation
+                <input id="validationRatio" type="number" min="0.05" max="0.4" step="0.05" value="0.15">
+              </label>
+              <label>
+                Test
+                <input id="testRatio" type="number" min="0.05" max="0.4" step="0.05" value="0.15">
+              </label>
+              <label>
+                Random seed
+                <input id="splitSeed" type="number" min="0" max="999999" step="1" value="42">
+              </label>
+            </div>
+          </section>
+
+          <section class="wizard-step">
+            <div class="wizard-step-heading">
+              <b>5</b>
+              <div><strong>학습 전 검사</strong><small>구조와 데이터 품질 확인</small></div>
+            </div>
+            <div class="data-inspector" id="dataInspector">
+              <div class="inspector-grid" id="inspectorGrid"></div>
+              <div class="data-warnings" id="dataWarnings"></div>
+              <div class="preview-scroll" id="dataPreview"></div>
+            </div>
+          </section>
+
           <button class="primary" id="applyPreprocessing" type="button" disabled>
-            전처리 적용 및 학습 데이터 연결
+            데이터 검증 및 모델 연결
           </button>
           <div class="data-summary" id="dataSummary">파일을 선택하세요.</div>
         </div>
@@ -317,6 +413,6 @@
   </template>
 
   <script src="./node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
-  <script type="module" src="./app.js?v=20260714-1"></script>
+  <script type="module" src="./app.js?v=20260715-4"></script>
 </body>
 </html>

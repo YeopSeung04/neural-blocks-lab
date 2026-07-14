@@ -43,10 +43,14 @@ http://127.0.0.1:8770
 - RNN 12-step 상승/하락 시계열 분류 실시간 학습
 - GAN 2차원 원형 데이터 adversarial training
 - GAN 목표 분포와 생성 샘플 실시간 비교
-- CSV 표 데이터 업로드와 feature / target 컬럼 매핑
+- 5단계 Dataset Setup Wizard: Source, Schema, Process, Split, Inspect
+- CSV 표 데이터 업로드와 다중 feature / target 컬럼 매핑
 - 이미지 폴더 업로드와 resize / grayscale / pixel normalization
-- 시계열 CSV 업로드와 sequence window 생성
-- 결측치 처리, scaling, validation split 전처리 블록
+- 시계열 CSV 업로드와 다중 signal, timestamp, sequence window 설정
+- Train / validation / test 분할과 고정 random seed
+- Train 데이터로만 결측치 대체 및 scaling 통계 계산
+- 표/이미지 stratified split과 시계열 chronological split
+- 행 수, 클래스 수, 결측치, Tensor shape, 데이터 미리보기 검사
 - 업로드 데이터를 실제 MLP/CNN/RNN 학습 세션에 연결
 - 가중치 hover 시 `activation x weight`, bias, `z`, activation output 표시
 - CPU, RAM, GPU, VRAM 또는 unified memory 실시간 모니터
@@ -58,9 +62,12 @@ http://127.0.0.1:8770
 
 ### CSV 표 데이터
 
-- 숫자 feature 열 2개
+- 숫자 feature 열 2개 이상
 - binary target 열 1개
-- MLP 학습과 2차원 결정경계에 연결
+- 모든 선택 feature를 MLP 학습에 사용
+- 결정경계에 표시할 X/Y feature를 별도로 선택
+- 표시하지 않는 feature는 Train 중앙값으로 고정
+- Stratified random, random, chronological 분할 선택
 - 샘플: `samples/tabular_binary.csv`
 
 ### 이미지 폴더
@@ -78,16 +85,22 @@ dataset/
 - 8, 16, 28, 32 크기 선택
 - grayscale 1채널 변환
 - `0~1` 또는 `-1~1` pixel normalization
+- 클래스 비율을 유지하는 stratified train / validation / test 분할
 - CNN 입력 shape와 자동 연결
 
 ### 시계열 CSV
 
-- 숫자 signal 열 1개
+- 숫자 signal 열 1개 이상
 - binary target 열 1개
+- 선택적 timestamp 또는 step 열
 - 8, 12, 16, 24 step window
 - stride 1, 2, 4, 8
+- 시간순 chronological train / validation / test 분할
+- 시계열 행은 무작위로 섞지 않음
 - RNN/LSTM/GRU 입력 shape와 자동 연결
 - 샘플: `samples/time_series_binary.csv`
+
+현재 사용자 데이터 학습은 이진 분류를 지원합니다. Wizard의 다중 분류와 회귀 항목은 지원 범위를 오해하지 않도록 비활성 상태로 표시합니다.
 
 ## 디바이스 성능 측정
 
@@ -175,7 +188,7 @@ npm run test:all
 
 `test.mjs`는 선형, XOR, 원형 데이터에서 학습 전후 손실 감소와 validation accuracy를 확인합니다.
 
-`data-pipeline-test.mjs`는 CSV parsing, 결측치 처리, feature scaling, binary label mapping, 시계열 window, 이미지 폴더 label 구조를 검증합니다.
+`data-pipeline-test.mjs`는 CSV parsing, 다중 feature, Train-only scaling, 명시적 train/validation/test 분할, binary label mapping, timestamp 정렬, 시계열 window, 이미지 폴더 label 구조를 검증합니다.
 
 `catalog-test.mjs`는 다음을 검증합니다.
 
@@ -185,6 +198,6 @@ npm run test:all
 - 입력과 출력 tensor shape
 - 파라미터 수
 
-`tf-training-test.mjs`는 CNN/RNN의 실제 손실 감소와 validation accuracy, GAN의 유한한 Generator/Discriminator loss, 학습 중 모델 교체 시 지연된 메모리 해제를 검증합니다.
+`tf-training-test.mjs`는 CNN/RNN의 실제 손실 감소와 validation accuracy, 업로드 RNN의 명시적 chronological tensor split, GAN의 유한한 Generator/Discriminator loss, 학습 중 모델 교체 시 지연된 메모리 해제를 검증합니다.
 
 `server_test.py`는 CPU/RAM/GPU 시스템 metric 응답 구조와 값 범위를 검증합니다.

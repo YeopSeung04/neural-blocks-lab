@@ -17,7 +17,7 @@ export const ACTIVATIONS = [
 export const MODEL_FAMILIES = {
   mlp: {
     label: "MLP / Dense",
-    description: "표 형태와 2D 좌표 데이터를 처리하는 완전연결 신경망",
+    description: "여러 표 Feature를 학습하고 선택한 두 축의 결정경계를 보여주는 완전연결 신경망",
     inputShape: [2],
     palette: ["dense", "dropout", "batchNormalization", "activation"],
     template: [

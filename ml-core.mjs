@@ -114,9 +114,10 @@ function zerosLikeLayer(layer) {
 }
 
 export class NeuralNetwork {
-  constructor(hiddenLayers = [], seed = 1) {
+  constructor(hiddenLayers = [], seed = 1, inputSize = 2) {
     this.hiddenLayers = hiddenLayers.map((layer) => ({ ...layer }));
     this.seed = seed;
+    this.inputSize = Math.max(1, Math.round(inputSize));
     this.random = createRng(seed);
     this.layers = [];
     this.optimizerState = null;
@@ -134,7 +135,7 @@ export class NeuralNetwork {
     ];
 
     this.layers = [];
-    let inputSize = 2;
+    let inputSize = this.inputSize;
 
     for (const definition of definitions) {
       const activation = activations[definition.activation] ? definition.activation : "relu";
@@ -338,7 +339,7 @@ export class NeuralNetwork {
 
   architecture() {
     return [
-      { type: "input", units: 2, activation: "linear" },
+      { type: "input", units: this.inputSize, activation: "linear" },
       ...this.layers.map((layer, index) => ({
         type: index === this.layers.length - 1 ? "output" : "hidden",
         units: layer.units,
@@ -373,6 +374,8 @@ export class TrainingSession {
     batchSize = 24,
     seed = 11,
     points = null,
+    pointSplits = null,
+    inputSize = null,
     validationRatio = 0.25,
   } = {}) {
     this.config = {
@@ -385,6 +388,8 @@ export class TrainingSession {
       batchSize,
       seed,
       points,
+      pointSplits,
+      inputSize,
       validationRatio,
     };
     this.reset();
@@ -397,25 +402,49 @@ export class TrainingSession {
       hiddenLayers: (nextConfig.hiddenLayers ?? this.config.hiddenLayers).map((layer) => ({ ...layer })),
     };
     this.random = createRng(this.config.seed);
-    this.points = this.config.points
-      ? this.config.points.map((point) => ({
-          input: point.input.slice(),
-          target: point.target,
-        }))
-      : makeDataset(
-          this.config.dataset,
-          this.config.count,
-          this.config.noise,
-          this.config.seed,
-        );
-    const split = splitDataset(
-      this.points,
-      this.config.validationRatio,
-      this.config.seed + 1,
+    const clonePoints = (points) => (points ?? []).map((point) => ({
+      input: point.input.slice(),
+      target: point.target,
+    }));
+    if (this.config.pointSplits) {
+      this.trainPoints = clonePoints(this.config.pointSplits.train);
+      this.validationPoints = clonePoints(this.config.pointSplits.validation);
+      this.testPoints = clonePoints(this.config.pointSplits.test);
+      this.points = [
+        ...this.trainPoints,
+        ...this.validationPoints,
+        ...this.testPoints,
+      ];
+    } else {
+      this.points = this.config.points
+        ? clonePoints(this.config.points)
+        : makeDataset(
+            this.config.dataset,
+            this.config.count,
+            this.config.noise,
+            this.config.seed,
+          );
+      const split = splitDataset(
+        this.points,
+        this.config.validationRatio,
+        this.config.seed + 1,
+      );
+      this.trainPoints = split.train;
+      this.validationPoints = split.validation;
+      this.testPoints = [];
+    }
+    if (!this.trainPoints.length || !this.validationPoints.length) {
+      throw new Error("Training and validation splits must contain data");
+    }
+    const resolvedInputSize =
+      this.config.inputSize ??
+      this.trainPoints[0]?.input.length ??
+      2;
+    this.network = new NeuralNetwork(
+      this.config.hiddenLayers,
+      this.config.seed + 2,
+      resolvedInputSize,
     );
-    this.trainPoints = split.train;
-    this.validationPoints = split.validation;
-    this.network = new NeuralNetwork(this.config.hiddenLayers, this.config.seed + 2);
     this.order = shuffle(
       Array.from({ length: this.trainPoints.length }, (_, index) => index),
       this.random,
@@ -472,6 +501,7 @@ export class TrainingSession {
     return {
       train: this.network.evaluate(this.trainPoints),
       validation: this.network.evaluate(this.validationPoints),
+      test: this.testPoints.length ? this.network.evaluate(this.testPoints) : null,
       epoch: this.epoch,
       steps: this.steps,
     };

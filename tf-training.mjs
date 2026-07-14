@@ -92,6 +92,33 @@ function splitTensorDataset(
 ) {
   const inputShape = inputShapeOverride ??
     (family === "cnn" ? [8, 8, 1] : [12, 1]);
+  if (datasetData?.splits) {
+    const toTensors = (split, name) => {
+      if (!split || split.count < 1) {
+        if (name === "test") return null;
+        throw new Error(`${name} split must contain at least one sample`);
+      }
+      const inputSize = inputShape.reduce((product, value) => product * value, 1);
+      if (split.xs.length !== split.count * inputSize || split.ys.length !== split.count) {
+        throw new Error(`${name} split shape does not match its sample count`);
+      }
+      return {
+        xs: tf.tensor(split.xs, [split.count, ...inputShape]),
+        ys: tf.tensor2d(split.ys, [split.count, 1]),
+      };
+    };
+    const train = toTensors(datasetData.splits.train, "train");
+    const validation = toTensors(datasetData.splits.validation, "validation");
+    const test = toTensors(datasetData.splits.test, "test");
+    return {
+      trainXs: train.xs,
+      trainYs: train.ys,
+      validationXs: validation.xs,
+      validationYs: validation.ys,
+      testXs: test?.xs ?? null,
+      testYs: test?.ys ?? null,
+    };
+  }
   let data;
   if (datasetData) {
     count = datasetData.count;
@@ -226,7 +253,7 @@ export class TfClassifierSession {
     this.disposed = true;
     this.model.dispose();
     this.optimizer?.dispose?.();
-    for (const tensor of Object.values(this.data)) tensor.dispose();
+    for (const tensor of Object.values(this.data)) tensor?.dispose?.();
   }
 
   dispose() {
