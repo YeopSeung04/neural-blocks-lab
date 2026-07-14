@@ -15,6 +15,14 @@ import {
   GanTrainingSession,
   TfClassifierSession,
 } from "./tf-training.mjs";
+import {
+  parseCsvText,
+  prepareImageDataset,
+  prepareTabularDataset,
+  prepareTimeSeriesDataset,
+  suggestColumnMapping,
+  summarizeImageFolder,
+} from "./data-pipeline.mjs";
 
 const elements = {
   modelFamily: document.getElementById("modelFamily"),
@@ -29,6 +37,23 @@ const elements = {
   resetTraining: document.getElementById("resetTraining"),
   trainingStatus: document.getElementById("trainingStatus"),
   statusDot: document.getElementById("statusDot"),
+  dataSource: document.getElementById("dataSource"),
+  dataPrivacyBadge: document.getElementById("dataPrivacyBadge"),
+  uploadControls: document.getElementById("uploadControls"),
+  fileInputRow: document.getElementById("fileInputRow"),
+  folderInputRow: document.getElementById("folderInputRow"),
+  dataFileInput: document.getElementById("dataFileInput"),
+  imageFolderInput: document.getElementById("imageFolderInput"),
+  columnMapping: document.getElementById("columnMapping"),
+  feature1Row: document.getElementById("feature1Row"),
+  feature2Row: document.getElementById("feature2Row"),
+  featureColumn1: document.getElementById("featureColumn1"),
+  featureColumn2: document.getElementById("featureColumn2"),
+  targetColumn: document.getElementById("targetColumn"),
+  preprocessPipeline: document.getElementById("preprocessPipeline"),
+  applyPreprocessing: document.getElementById("applyPreprocessing"),
+  dataSummary: document.getElementById("dataSummary"),
+  builtInDataControls: document.getElementById("builtInDataControls"),
   datasetType: document.getElementById("datasetType"),
   dataCount: document.getElementById("dataCount"),
   dataCountValue: document.getElementById("dataCountValue"),
@@ -48,6 +73,7 @@ const elements = {
   architectureExplanation: document.getElementById("architectureExplanation"),
   decisionCanvas: document.getElementById("decisionCanvas"),
   networkCanvas: document.getElementById("networkCanvas"),
+  weightTooltip: document.getElementById("weightTooltip"),
   lossCanvas: document.getElementById("lossCanvas"),
   datasetBadge: document.getElementById("datasetBadge"),
   probeValue: document.getElementById("probeValue"),
@@ -66,6 +92,28 @@ const elements = {
   networkVisualDescription: document.getElementById("networkVisualDescription"),
   lossVisualTitle: document.getElementById("lossVisualTitle"),
   lossVisualDescription: document.getElementById("lossVisualDescription"),
+  resourceStatus: document.getElementById("resourceStatus"),
+  cpuValue: document.getElementById("cpuValue"),
+  cpuBar: document.getElementById("cpuBar"),
+  cpuSpark: document.getElementById("cpuSpark"),
+  cpuDetail: document.getElementById("cpuDetail"),
+  ramValue: document.getElementById("ramValue"),
+  ramBar: document.getElementById("ramBar"),
+  ramSpark: document.getElementById("ramSpark"),
+  ramDetail: document.getElementById("ramDetail"),
+  gpuValue: document.getElementById("gpuValue"),
+  gpuBar: document.getElementById("gpuBar"),
+  gpuSpark: document.getElementById("gpuSpark"),
+  gpuDetail: document.getElementById("gpuDetail"),
+  vramValue: document.getElementById("vramValue"),
+  vramBar: document.getElementById("vramBar"),
+  vramSpark: document.getElementById("vramSpark"),
+  vramDetail: document.getElementById("vramDetail"),
+  tfBackendValue: document.getElementById("tfBackendValue"),
+  tfTensorCount: document.getElementById("tfTensorCount"),
+  tfMemoryValue: document.getElementById("tfMemoryValue"),
+  jsHeapValue: document.getElementById("jsHeapValue"),
+  tfDetail: document.getElementById("tfDetail"),
 };
 
 const datasetLabels = {
@@ -94,6 +142,29 @@ let compiledAdvancedModels = null;
 let advancedCompileInfo = null;
 let advancedTrainingSession = null;
 let advancedTrainingPending = false;
+let parsedUpload = null;
+let selectedImageFiles = [];
+let activeUserDataset = null;
+let weightHitTargets = [];
+let hoveredWeightKey = null;
+let weightPointer = null;
+let lastFrameTimestamp = performance.now();
+let mainThreadLoad = 0;
+const preprocessing = {
+  missingStrategy: "drop",
+  scaling: "standard",
+  validationRatio: 0.2,
+  imageSize: 8,
+  pixelScaling: "zeroOne",
+  sequenceLength: 12,
+  stride: 1,
+};
+const resourceHistory = {
+  cpu: [],
+  ram: [],
+  gpu: [],
+  vram: [],
+};
 const advancedArchitectures = {
   cnn: cloneTemplate("cnn"),
   rnn: cloneTemplate("rnn"),
@@ -115,6 +186,8 @@ function currentConfig() {
     dataset: elements.datasetType.value,
     count: Number(elements.dataCount.value),
     noise: Number(elements.noise.value),
+    points: activeUserDataset?.family === "mlp" ? activeUserDataset.points : null,
+    validationRatio: preprocessing.validationRatio,
     hiddenLayers: hiddenLayers.map(({ units, activation }) => ({ units, activation })),
     optimizer: elements.optimizer.value,
     learningRate: Number(elements.learningRate.value),
@@ -133,6 +206,7 @@ function createFixedBlock(type, title, detail) {
 function advancedInputShape() {
   const family = elements.modelFamily.value;
   if (family === "gan") return activeGanBranch === "generator" ? [4] : [2];
+  if (activeUserDataset?.family === family) return activeUserDataset.inputShape;
   return MODEL_FAMILIES[family].inputShape;
 }
 
@@ -355,6 +429,7 @@ function createAdvancedTrainingSession() {
     optimizer: elements.optimizer.value,
     learningRate: Number(elements.learningRate.value),
     batchSize: Number(elements.batchSize.value),
+    validationRatio: preprocessing.validationRatio,
   };
   advancedTrainingSession = family === "gan"
     ? new GanTrainingSession(tf, advancedArchitectures.gan, {
@@ -364,6 +439,10 @@ function createAdvancedTrainingSession() {
     : new TfClassifierSession(tf, family, activeAdvancedLayers(), {
         ...config,
         model: compiledAdvancedModels,
+        datasetData: activeUserDataset?.family === family
+          ? activeUserDataset.datasetData
+          : null,
+        inputShape: advancedInputShape(),
       });
 }
 
@@ -391,10 +470,10 @@ function compileAdvancedArchitecture() {
       advancedCompileInfo.output =
         `G [batch, 4] -> [batch, 2], D [batch, 2] -> [batch, 1]`;
     } else {
-      compiledAdvancedModels = buildClassifier(tf, family, layers);
+      compiledAdvancedModels = buildClassifier(tf, family, layers, advancedInputShape());
       advancedCompileInfo.parameterCount = compiledAdvancedModels.countParams();
       advancedCompileInfo.output =
-        `[batch, ${MODEL_FAMILIES[family].inputShape.join(", ")}] -> [batch, 1]`;
+        `[batch, ${advancedInputShape().join(", ")}] -> [batch, 1]`;
     }
   } catch (error) {
     advancedCompileInfo.error = error.message;
@@ -527,14 +606,33 @@ function moveLayerTo(layerId, targetId) {
   rebuildModel();
 }
 
+function usesActiveUserDataset() {
+  return activeUserDataset?.family === elements.modelFamily.value;
+}
+
+function activeDatasetName() {
+  if (usesActiveUserDataset()) return activeUserDataset.name;
+  if (isAdvancedFamily()) {
+    return {
+      cnn: "8x8 선 방향 이미지",
+      rnn: "12-step 상승/하락 시계열",
+      gan: "2D 원형 목표 분포",
+    }[elements.modelFamily.value];
+  }
+  return datasetLabels[elements.datasetType.value];
+}
+
 function updateControlLabels() {
-  elements.dataCountValue.textContent = elements.dataCount.value;
+  const uploadedCount = usesActiveUserDataset()
+    ? activeUserDataset.points?.length ?? activeUserDataset.datasetData?.count
+    : null;
+  elements.dataCountValue.textContent = uploadedCount ?? elements.dataCount.value;
   elements.noiseValue.textContent = Number(elements.noise.value).toFixed(2);
   elements.learningRateValue.textContent = Number(elements.learningRate.value).toFixed(3);
   elements.batchSizeValue.textContent = elements.batchSize.value;
   elements.speedValue.textContent = elements.trainingSpeed.value;
   elements.maxEpochsValue.textContent = elements.maxEpochs.value;
-  elements.datasetBadge.textContent = datasetLabels[elements.datasetType.value];
+  elements.datasetBadge.textContent = activeDatasetName();
   const family = MODEL_FAMILIES[elements.modelFamily.value];
   elements.familyDescription.textContent = family.description;
 }
@@ -554,7 +652,8 @@ function rebuildModel({ preserveRunning = false } = {}) {
   elements.primaryVisualTitle.textContent = "실시간 결정경계";
   elements.primaryVisualDescription.textContent = "배경색은 모델 예측, 점은 학습 데이터입니다.";
   elements.networkVisualTitle.textContent = "뉴런 활성화";
-  elements.networkVisualDescription.textContent = "결정경계를 클릭해 입력점을 바꿀 수 있습니다.";
+  elements.networkVisualDescription.textContent =
+    "가중치 선에 마우스를 올리면 현재 forward 계산식을 확인할 수 있습니다.";
   elements.lossVisualTitle.textContent = "학습 곡선";
   elements.lossVisualDescription.textContent = "Train / validation loss";
   elements.trainLossLabel.textContent = "Train loss";
@@ -582,20 +681,23 @@ function setAdvancedEngineState() {
   });
   elements.toggleTraining.disabled = advanced && Boolean(advancedCompileInfo?.error);
   elements.stepTraining.disabled = advanced && Boolean(advancedCompileInfo?.error);
-  elements.datasetType.disabled = advanced;
-  elements.noise.disabled = advanced;
-  elements.dataCount.disabled = advanced && family === "gan";
+  const uploaded = usesActiveUserDataset();
+  elements.datasetType.disabled = advanced || uploaded;
+  elements.noise.disabled = advanced || uploaded;
+  elements.dataCount.disabled = uploaded || (advanced && family === "gan");
   datasetOptions.forEach((option, index) => {
     option.hidden = advanced && index > 0;
   });
-  datasetOptions[0].textContent = advanced
-    ? {
-        cnn: "8x8 선 방향 이미지",
-        rnn: "12-step 상승/하락 시계열",
-        gan: "2D 원형 목표 분포",
-      }[family]
-    : "XOR";
-  if (advanced) elements.datasetType.selectedIndex = 0;
+  datasetOptions[0].textContent = uploaded
+    ? activeUserDataset.name
+    : advanced
+      ? {
+          cnn: "8x8 선 방향 이미지",
+          rnn: "12-step 상승/하락 시계열",
+          gan: "2D 원형 목표 분포",
+        }[family]
+      : "XOR";
+  if (advanced || uploaded) elements.datasetType.selectedIndex = 0;
   for (const control of [
     elements.optimizer,
     elements.learningRate,
@@ -616,6 +718,245 @@ function setStatus(text, active = running) {
 function updateStatus() {
   elements.toggleTraining.textContent = running ? "일시정지" : "학습 시작";
   setStatus(running ? "학습 중" : "일시정지", running);
+}
+
+function setDataSummary(text, state = "neutral") {
+  elements.dataSummary.className = "data-summary";
+  if (state === "valid" || state === "invalid") {
+    elements.dataSummary.classList.add(state);
+  }
+  elements.dataSummary.textContent = text;
+}
+
+function createPreprocessBlock(title, description, setting, options, value) {
+  const block = document.createElement("div");
+  block.className = "preprocess-block";
+  const text = document.createElement("div");
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const detail = document.createElement("small");
+  detail.textContent = description;
+  text.append(heading, detail);
+
+  const select = document.createElement("select");
+  select.dataset.preprocessSetting = setting;
+  for (const optionDefinition of options) {
+    const option = document.createElement("option");
+    const [optionValue, label] = Array.isArray(optionDefinition)
+      ? optionDefinition
+      : [optionDefinition, optionDefinition];
+    option.value = String(optionValue);
+    option.textContent = label;
+    select.append(option);
+  }
+  select.value = String(value);
+  block.append(text, select);
+  return block;
+}
+
+function renderPreprocessingPipeline() {
+  const source = elements.dataSource.value;
+  elements.preprocessPipeline.replaceChildren();
+  if (source === "builtIn") return;
+
+  if (source !== "imageFolder") {
+    elements.preprocessPipeline.append(createPreprocessBlock(
+      "결측치 처리",
+      "빈 숫자 셀을 제거하거나 열 평균으로 대체",
+      "missingStrategy",
+      [["drop", "행 제거"], ["mean", "평균값 대체"]],
+      preprocessing.missingStrategy,
+    ));
+    elements.preprocessPipeline.append(createPreprocessBlock(
+      "Feature scaling",
+      "학습 전에 숫자 feature 범위를 조정",
+      "scaling",
+      [["standard", "Standard (z-score)"], ["minmax", "MinMax (-1~1)"], ["none", "변환 없음"]],
+      preprocessing.scaling,
+    ));
+  }
+
+  if (source === "imageFolder") {
+    elements.preprocessPipeline.append(createPreprocessBlock(
+      "Resize + Grayscale",
+      "모든 이미지를 같은 크기의 1채널 tensor로 변환",
+      "imageSize",
+      [[8, "8 x 8"], [16, "16 x 16"], [28, "28 x 28"], [32, "32 x 32"]],
+      preprocessing.imageSize,
+    ));
+    elements.preprocessPipeline.append(createPreprocessBlock(
+      "Pixel normalization",
+      "픽셀 범위를 CNN 입력에 맞게 변환",
+      "pixelScaling",
+      [["zeroOne", "0 ~ 1"], ["minusOneOne", "-1 ~ 1"]],
+      preprocessing.pixelScaling,
+    ));
+  }
+
+  if (source === "timeSeries") {
+    elements.preprocessPipeline.append(createPreprocessBlock(
+      "Sequence window",
+      "연속 행을 하나의 RNN 입력 시퀀스로 묶음",
+      "sequenceLength",
+      [[8, "8 steps"], [12, "12 steps"], [16, "16 steps"], [24, "24 steps"]],
+      preprocessing.sequenceLength,
+    ));
+    elements.preprocessPipeline.append(createPreprocessBlock(
+      "Window stride",
+      "다음 시퀀스가 시작되는 행 간격",
+      "stride",
+      [[1, "1 row"], [2, "2 rows"], [4, "4 rows"], [8, "8 rows"]],
+      preprocessing.stride,
+    ));
+  }
+
+  elements.preprocessPipeline.append(createPreprocessBlock(
+    "Train / validation split",
+    "validation 데이터는 가중치 업데이트에 사용하지 않음",
+    "validationRatio",
+    [[0.1, "90 / 10"], [0.2, "80 / 20"], [0.25, "75 / 25"], [0.3, "70 / 30"], [0.4, "60 / 40"]],
+    preprocessing.validationRatio,
+  ));
+}
+
+function populateColumnSelect(select, headers, selectedValue) {
+  select.replaceChildren();
+  for (const header of headers) {
+    const option = document.createElement("option");
+    option.value = header;
+    option.textContent = header;
+    select.append(option);
+  }
+  if (headers.includes(selectedValue)) select.value = selectedValue;
+}
+
+function updateColumnMapping(parsed) {
+  const mapping = suggestColumnMapping(parsed.headers);
+  populateColumnSelect(elements.featureColumn1, parsed.headers, mapping.signalColumn);
+  populateColumnSelect(
+    elements.featureColumn2,
+    parsed.headers,
+    mapping.featureColumns[1] ?? mapping.featureColumns[0],
+  );
+  populateColumnSelect(elements.targetColumn, parsed.headers, mapping.targetColumn);
+  elements.columnMapping.hidden = false;
+}
+
+function renderDataSourceControls() {
+  const source = elements.dataSource.value;
+  const builtIn = source === "builtIn";
+  elements.uploadControls.hidden = builtIn;
+  elements.builtInDataControls.hidden = !builtIn;
+  elements.fileInputRow.hidden = builtIn || source === "imageFolder";
+  elements.folderInputRow.hidden = source !== "imageFolder";
+  elements.columnMapping.hidden =
+    source === "imageFolder" || !parsedUpload;
+  elements.feature2Row.hidden = source === "timeSeries";
+  elements.dataPrivacyBadge.textContent = builtIn ? "내장 데이터" : "로컬 브라우저 처리";
+  elements.dataFileInput.accept = source === "timeSeries"
+    ? ".csv,.tsv,text/csv,text/tab-separated-values"
+    : ".csv,.tsv,text/csv,text/tab-separated-values";
+  renderPreprocessingPipeline();
+}
+
+function resetUploadedData() {
+  parsedUpload = null;
+  selectedImageFiles = [];
+  activeUserDataset = null;
+  elements.dataFileInput.value = "";
+  elements.imageFolderInput.value = "";
+  elements.applyPreprocessing.disabled = true;
+  setDataSummary("파일을 선택하세요.");
+}
+
+function describePreparedDataset(dataset) {
+  if (dataset.family === "mlp") {
+    return [
+      `전처리 완료: ${dataset.points.length} rows`,
+      `features: ${dataset.summary.features.join(", ")}`,
+      `classes: ${dataset.summary.classes.join(" / ")}`,
+      `scaling: ${dataset.summary.scaling}`,
+    ].join("\n");
+  }
+  if (dataset.family === "cnn") {
+    return [
+      `전처리 완료: ${dataset.datasetData.count} images`,
+      `shape: [${dataset.inputShape.join(", ")}]`,
+      `classes: ${dataset.summary.classes.join(" / ")}`,
+      `pixels: ${dataset.summary.pixelScaling}`,
+    ].join("\n");
+  }
+  return [
+    `전처리 완료: ${dataset.datasetData.count} windows`,
+    `shape: [${dataset.inputShape.join(", ")}]`,
+    `signal: ${dataset.summary.signal}`,
+    `classes: ${dataset.summary.classes.join(" / ")}`,
+  ].join("\n");
+}
+
+function rebuildForCurrentFamily() {
+  if (isAdvancedFamily()) rebuildAdvancedStudio();
+  else rebuildModel();
+}
+
+async function applyUploadedDataset() {
+  const source = elements.dataSource.value;
+  elements.applyPreprocessing.disabled = true;
+  setDataSummary("전처리 중...");
+  running = false;
+  try {
+    let prepared;
+    let name;
+    if (source === "csv") {
+      prepared = prepareTabularDataset(parsedUpload, {
+        featureColumns: [
+          elements.featureColumn1.value,
+          elements.featureColumn2.value,
+        ],
+        targetColumn: elements.targetColumn.value,
+        missingStrategy: preprocessing.missingStrategy,
+        scaling: preprocessing.scaling,
+      });
+      name = elements.dataFileInput.files[0]?.name ?? "uploaded.csv";
+    } else if (source === "timeSeries") {
+      prepared = prepareTimeSeriesDataset(parsedUpload, {
+        signalColumn: elements.featureColumn1.value,
+        targetColumn: elements.targetColumn.value,
+        sequenceLength: preprocessing.sequenceLength,
+        stride: preprocessing.stride,
+        missingStrategy: preprocessing.missingStrategy,
+        scaling: preprocessing.scaling,
+      });
+      name = elements.dataFileInput.files[0]?.name ?? "timeseries.csv";
+    } else if (source === "imageFolder") {
+      prepared = await prepareImageDataset(selectedImageFiles, {
+        imageSize: preprocessing.imageSize,
+        pixelScaling: preprocessing.pixelScaling,
+      });
+      name = selectedImageFiles[0]?.webkitRelativePath?.split("/")[0] ?? "image folder";
+    } else {
+      throw new Error("Select an upload data source first");
+    }
+    activeUserDataset = {
+      ...prepared,
+      name,
+      source,
+    };
+    if (elements.modelFamily.value !== prepared.family) {
+      elements.modelFamily.value = prepared.family;
+      elements.modelFamily.dispatchEvent(new Event("change"));
+    } else {
+      rebuildForCurrentFamily();
+    }
+    setDataSummary(describePreparedDataset(activeUserDataset), "valid");
+  } catch (error) {
+    activeUserDataset = null;
+    setDataSummary(`전처리 오류: ${error.message}`, "invalid");
+    rebuildForCurrentFamily();
+  } finally {
+    elements.applyPreprocessing.disabled =
+      source === "imageFolder" ? !selectedImageFiles.length : !parsedUpload;
+  }
 }
 
 function resizeCanvas(canvas) {
@@ -724,6 +1065,41 @@ function displayedIndices(total, maximum = 12) {
   );
 }
 
+function distanceToSegment(pointX, pointY, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return Math.hypot(pointX - x1, pointY - y1);
+  const projection = Math.max(
+    0,
+    Math.min(1, ((pointX - x1) * dx + (pointY - y1) * dy) / lengthSquared),
+  );
+  const closestX = x1 + projection * dx;
+  const closestY = y1 + projection * dy;
+  return Math.hypot(pointX - closestX, pointY - closestY);
+}
+
+function updateWeightTooltip(target) {
+  if (!target || !weightPointer || isAdvancedFamily()) {
+    elements.weightTooltip.hidden = true;
+    return;
+  }
+  const activationName = target.activation.toUpperCase();
+  elements.weightTooltip.innerHTML =
+    `<strong>Layer ${target.layerIndex + 1} · Weight ${target.unitIndex + 1},${target.inputIndex + 1}</strong><br>` +
+    `a = ${target.inputValue.toFixed(5)}<br>` +
+    `w = ${target.weight.toFixed(5)}<br>` +
+    `a × w = <b>${target.contribution.toFixed(5)}</b><br>` +
+    `Σ(a × w) + bias(${target.bias.toFixed(5)}) = z(${target.z.toFixed(5)})<br>` +
+    `${activationName}(z) = <b>${target.output.toFixed(5)}</b>`;
+  elements.weightTooltip.hidden = false;
+  const parent = elements.weightTooltip.parentElement;
+  const maxLeft = Math.max(8, parent.clientWidth - elements.weightTooltip.offsetWidth - 8);
+  const maxTop = Math.max(8, parent.clientHeight - elements.weightTooltip.offsetHeight - 8);
+  elements.weightTooltip.style.left = `${Math.max(8, Math.min(maxLeft, weightPointer.left))}px`;
+  elements.weightTooltip.style.top = `${Math.max(8, Math.min(maxTop, weightPointer.top))}px`;
+}
+
 function drawNetwork() {
   const { context, width, height } = resizeCanvas(elements.networkCanvas);
   context.clearRect(0, 0, width, height);
@@ -732,6 +1108,7 @@ function drawNetwork() {
 
   const architecture = session.network.architecture();
   const snapshot = session.network.activationSnapshot(probe);
+  weightHitTargets = [];
   const columns = architecture.map((layer, layerIndex) => {
     const values = layerIndex === 0 ? probe : snapshot.layers[layerIndex - 1];
     const indices = displayedIndices(layer.units);
@@ -758,14 +1135,41 @@ function drawNetwork() {
         const previousIndex = previous.indices[previousDisplay];
         const weight = weightLayer.weights[currentIndex][previousIndex];
         const magnitude = Math.min(1, Math.abs(weight) / 2.5);
-        context.strokeStyle = weight >= 0
-          ? `rgba(57, 208, 199, ${0.12 + magnitude * 0.68})`
-          : `rgba(255, 107, 107, ${0.12 + magnitude * 0.68})`;
-        context.lineWidth = 0.5 + magnitude * 2.2;
+        const x1 = previous.x;
+        const y1 = nodeY(previousDisplay, previous.indices.length);
+        const x2 = current.x;
+        const y2 = nodeY(currentDisplay, current.indices.length);
+        const key = `${layerIndex - 1}:${currentIndex}:${previousIndex}`;
+        const hovered = hoveredWeightKey === key;
+        context.strokeStyle = hovered
+          ? "#f7d66d"
+          : weight >= 0
+            ? `rgba(57, 208, 199, ${0.12 + magnitude * 0.68})`
+            : `rgba(255, 107, 107, ${0.12 + magnitude * 0.68})`;
+        context.lineWidth = hovered ? 4 : 0.5 + magnitude * 2.2;
         context.beginPath();
-        context.moveTo(previous.x, nodeY(previousDisplay, previous.indices.length));
-        context.lineTo(current.x, nodeY(currentDisplay, current.indices.length));
+        context.moveTo(x1, y1);
+        context.lineTo(x2, y2);
         context.stroke();
+        const detail = snapshot.details[layerIndex - 1];
+        const inputValue = previous.values[previousIndex] ?? 0;
+        weightHitTargets.push({
+          key,
+          x1,
+          y1,
+          x2,
+          y2,
+          layerIndex: layerIndex - 1,
+          unitIndex: currentIndex,
+          inputIndex: previousIndex,
+          inputValue,
+          weight,
+          contribution: inputValue * weight,
+          bias: weightLayer.biases[currentIndex],
+          z: detail.z[currentIndex],
+          output: detail.output[currentIndex],
+          activation: weightLayer.activation,
+        });
       }
     }
   }
@@ -802,6 +1206,9 @@ function drawNetwork() {
   context.fillStyle = "#a7b4c2";
   context.font = "11px system-ui";
   context.fillText(`prediction ${(snapshot.output * 100).toFixed(1)}%`, 10, height - 10);
+  updateWeightTooltip(
+    weightHitTargets.find((target) => target.key === hoveredWeightKey) ?? null,
+  );
 }
 
 function drawLossChart(history = session?.history ?? []) {
@@ -1022,7 +1429,10 @@ function drawGanDistribution() {
 
 function drawAdvancedVisuals() {
   const family = elements.modelFamily.value;
-  elements.datasetBadge.textContent = MODEL_FAMILIES[family].label;
+  elements.weightTooltip.hidden = true;
+  elements.datasetBadge.textContent = usesActiveUserDataset()
+    ? activeUserDataset.name
+    : MODEL_FAMILIES[family].label;
   elements.primaryVisualTitle.textContent = family === "gan"
     ? "실시간 생성 분포"
     : "Tensor shape flow";
@@ -1095,6 +1505,148 @@ function drawAll() {
   updateMetrics();
 }
 
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = Math.max(0, value);
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function appendResourceHistory(key, value) {
+  if (!Number.isFinite(value)) return;
+  resourceHistory[key].push(Math.max(0, Math.min(100, value)));
+  if (resourceHistory[key].length > 48) resourceHistory[key].shift();
+}
+
+function drawResourceSpark(canvas, values, color = "#39d0c7") {
+  const { context, width, height } = resizeCanvas(canvas);
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#0f151c";
+  context.fillRect(0, 0, width, height);
+  context.strokeStyle = "rgba(255,255,255,0.08)";
+  context.lineWidth = 1;
+  for (let index = 1; index < 4; index += 1) {
+    const y = height * index / 4;
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(width, y);
+    context.stroke();
+  }
+  if (!values.length) return;
+  context.strokeStyle = color;
+  context.lineWidth = 1.8;
+  context.beginPath();
+  values.forEach((value, index) => {
+    const x = values.length === 1 ? width : index / (values.length - 1) * width;
+    const y = height - value / 100 * height;
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.stroke();
+}
+
+function setResourceBar(bar, value) {
+  bar.style.width = Number.isFinite(value)
+    ? `${Math.max(0, Math.min(100, value))}%`
+    : "0%";
+}
+
+function updateTensorFlowMetrics() {
+  const tf = globalThis.tf;
+  if (!tf) {
+    elements.tfBackendValue.textContent = "unavailable";
+    return;
+  }
+  const memory = tf.memory();
+  elements.tfBackendValue.textContent = tf.getBackend();
+  elements.tfTensorCount.textContent = memory.numTensors.toLocaleString();
+  elements.tfMemoryValue.textContent = formatBytes(memory.numBytes);
+  const heap = performance.memory;
+  elements.jsHeapValue.textContent = heap
+    ? `${formatBytes(heap.usedJSHeapSize)} / ${formatBytes(heap.jsHeapSizeLimit)}`
+    : "browser 제한";
+  elements.tfDetail.textContent = memory.unreliable
+    ? `Tensor bytes는 ${memory.reasons?.join(", ") || "backend 특성"}으로 추정값`
+    : "현재 페이지가 보유한 TensorFlow.js tensor 메모리";
+}
+
+async function updateResourceMonitor() {
+  updateTensorFlowMetrics();
+  try {
+    const response = await fetch("/api/system-metrics", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const metrics = await response.json();
+    const cpu = metrics.cpu.usagePercent;
+    const ram = metrics.memory.usagePercent;
+    const gpu = metrics.gpu.usagePercent;
+    const gpuMemoryUsed =
+      metrics.gpu.memoryUsedBytes ?? metrics.gpu.memoryAllocatedBytes;
+    const gpuMemoryTotal = metrics.gpu.memoryTotalBytes;
+    const vram = Number.isFinite(gpuMemoryUsed) && Number.isFinite(gpuMemoryTotal)
+      ? gpuMemoryUsed / gpuMemoryTotal * 100
+      : NaN;
+
+    elements.resourceStatus.textContent = "OS bridge 연결";
+    elements.cpuValue.textContent = Number.isFinite(cpu) ? `${cpu.toFixed(1)}%` : "-";
+    elements.cpuDetail.textContent =
+      `${metrics.cpu.logicalCores ?? navigator.hardwareConcurrency ?? "-"} logical cores · ${metrics.cpu.source}`;
+    elements.ramValue.textContent = Number.isFinite(ram) ? `${ram.toFixed(1)}%` : "-";
+    elements.ramDetail.textContent =
+      `${formatBytes(metrics.memory.usedBytes)} / ${formatBytes(metrics.memory.totalBytes)}`;
+    elements.gpuValue.textContent = Number.isFinite(gpu) ? `${gpu.toFixed(1)}%` : "N/A";
+    elements.gpuDetail.textContent =
+      `${metrics.gpu.name ?? "GPU"} · ${metrics.gpu.source}`;
+    elements.vramValue.textContent = Number.isFinite(vram) ? `${vram.toFixed(1)}%` : "N/A";
+    elements.vramDetail.textContent = Number.isFinite(gpuMemoryUsed)
+      ? `${formatBytes(gpuMemoryUsed)} used · ${metrics.gpu.memoryType}`
+      : `실제 VRAM 측정 불가 · ${metrics.gpu.memoryType}`;
+
+    setResourceBar(elements.cpuBar, cpu);
+    setResourceBar(elements.ramBar, ram);
+    setResourceBar(elements.gpuBar, gpu);
+    setResourceBar(elements.vramBar, vram);
+    appendResourceHistory("cpu", cpu);
+    appendResourceHistory("ram", ram);
+    appendResourceHistory("gpu", gpu);
+    appendResourceHistory("vram", vram);
+  } catch {
+    const heap = performance.memory;
+    const heapPercent = heap
+      ? heap.usedJSHeapSize / heap.jsHeapSizeLimit * 100
+      : NaN;
+    elements.resourceStatus.textContent = "브라우저 제한 모드";
+    elements.cpuValue.textContent = `${mainThreadLoad.toFixed(1)}%`;
+    elements.cpuDetail.textContent =
+      `UI thread 부하 추정 · ${navigator.hardwareConcurrency ?? "-"} logical cores`;
+    elements.ramValue.textContent = Number.isFinite(heapPercent)
+      ? `${heapPercent.toFixed(1)}%`
+      : "N/A";
+    elements.ramDetail.textContent = heap
+      ? `JS heap ${formatBytes(heap.usedJSHeapSize)} / ${formatBytes(heap.jsHeapSizeLimit)}`
+      : `deviceMemory 약 ${navigator.deviceMemory ?? "-"} GB · 실제 사용률 제한`;
+    elements.gpuValue.textContent = "N/A";
+    elements.gpuDetail.textContent = `${globalThis.tf?.getBackend?.() ?? "GPU"} backend · 사용률 API 제한`;
+    elements.vramValue.textContent = "N/A";
+    elements.vramDetail.textContent = "브라우저는 실제 VRAM 사용량을 제공하지 않음";
+    setResourceBar(elements.cpuBar, mainThreadLoad);
+    setResourceBar(elements.ramBar, heapPercent);
+    setResourceBar(elements.gpuBar, NaN);
+    setResourceBar(elements.vramBar, NaN);
+    appendResourceHistory("cpu", mainThreadLoad);
+    appendResourceHistory("ram", heapPercent);
+  }
+
+  drawResourceSpark(elements.cpuSpark, resourceHistory.cpu);
+  drawResourceSpark(elements.ramSpark, resourceHistory.ram, "#67a9ff");
+  drawResourceSpark(elements.gpuSpark, resourceHistory.gpu, "#f7d66d");
+  drawResourceSpark(elements.vramSpark, resourceHistory.vram, "#ffad5a");
+}
+
 async function runAdvancedTrainingStep(stepCount = Number(elements.trainingSpeed.value)) {
   if (!advancedTrainingSession || advancedTrainingPending) return false;
   const trainingSession = advancedTrainingSession;
@@ -1127,6 +1679,10 @@ async function runAdvancedTrainingStep(stepCount = Number(elements.trainingSpeed
 }
 
 function animationFrame(timestamp) {
+  const frameDuration = Math.max(0, timestamp - lastFrameTimestamp);
+  lastFrameTimestamp = timestamp;
+  const frameLoad = Math.max(0, Math.min(100, (frameDuration - 16.7) / 50 * 100));
+  mainThreadLoad = mainThreadLoad * 0.9 + frameLoad * 0.1;
   if (running) {
     const currentEpoch = isAdvancedFamily()
       ? advancedTrainingSession?.metrics?.().epoch ?? 0
@@ -1264,6 +1820,79 @@ function setupArchitectureEvents() {
   });
 }
 
+function setupDataControls() {
+  elements.dataSource.addEventListener("change", () => {
+    running = false;
+    resetUploadedData();
+    renderDataSourceControls();
+    rebuildForCurrentFamily();
+  });
+
+  elements.dataFileInput.addEventListener("change", async () => {
+    const file = elements.dataFileInput.files[0];
+    if (!file) {
+      parsedUpload = null;
+      elements.applyPreprocessing.disabled = true;
+      setDataSummary("파일을 선택하세요.");
+      return;
+    }
+    try {
+      parsedUpload = parseCsvText(await file.text());
+      updateColumnMapping(parsedUpload);
+      renderDataSourceControls();
+      elements.applyPreprocessing.disabled = false;
+      setDataSummary(
+        `${file.name}\n${parsedUpload.rows.length} rows · ${parsedUpload.headers.length} columns`,
+      );
+    } catch (error) {
+      parsedUpload = null;
+      elements.applyPreprocessing.disabled = true;
+      setDataSummary(`파일 오류: ${error.message}`, "invalid");
+    }
+  });
+
+  elements.imageFolderInput.addEventListener("change", () => {
+    selectedImageFiles = [...elements.imageFolderInput.files];
+    try {
+      const summary = summarizeImageFolder(selectedImageFiles);
+      elements.applyPreprocessing.disabled = summary.imageCount < 1;
+      setDataSummary(
+        `${summary.imageCount} images\nclasses: ${summary.classes.join(" / ") || "확인 불가"}`,
+      );
+    } catch (error) {
+      selectedImageFiles = [];
+      elements.applyPreprocessing.disabled = true;
+      setDataSummary(`폴더 오류: ${error.message}`, "invalid");
+    }
+  });
+
+  elements.preprocessPipeline.addEventListener("change", (event) => {
+    const setting = event.target.dataset.preprocessSetting;
+    if (!setting) return;
+    const numericSettings = new Set([
+      "validationRatio",
+      "imageSize",
+      "sequenceLength",
+      "stride",
+    ]);
+    preprocessing[setting] = numericSettings.has(setting)
+      ? Number(event.target.value)
+      : event.target.value;
+    elements.applyPreprocessing.disabled =
+      elements.dataSource.value === "imageFolder"
+        ? !selectedImageFiles.length
+        : !parsedUpload;
+    setDataSummary("전처리 설정이 변경되었습니다. 다시 적용하세요.");
+  });
+
+  elements.columnMapping.addEventListener("change", () => {
+    elements.applyPreprocessing.disabled = !parsedUpload;
+    setDataSummary("컬럼 매핑이 변경되었습니다. 전처리를 적용하세요.");
+  });
+
+  elements.applyPreprocessing.addEventListener("click", applyUploadedDataset);
+}
+
 function setupControls() {
   elements.modelFamily.addEventListener("change", () => {
     running = false;
@@ -1369,13 +1998,58 @@ function setupControls() {
     drawNetwork();
   });
 
+  elements.networkCanvas.addEventListener("mousemove", (event) => {
+    if (isAdvancedFamily()) {
+      hoveredWeightKey = null;
+      elements.weightTooltip.hidden = true;
+      return;
+    }
+    const rect = elements.networkCanvas.getBoundingClientRect();
+    const pointX = event.clientX - rect.left;
+    const pointY = event.clientY - rect.top;
+    let nearest = null;
+    let nearestDistance = 7;
+    for (const target of weightHitTargets) {
+      const distance = distanceToSegment(
+        pointX,
+        pointY,
+        target.x1,
+        target.y1,
+        target.x2,
+        target.y2,
+      );
+      if (distance < nearestDistance) {
+        nearest = target;
+        nearestDistance = distance;
+      }
+    }
+    const parentRect = elements.weightTooltip.parentElement.getBoundingClientRect();
+    weightPointer = {
+      left: event.clientX - parentRect.left + 12,
+      top: event.clientY - parentRect.top + 12,
+    };
+    hoveredWeightKey = nearest?.key ?? null;
+    drawNetwork();
+  });
+
+  elements.networkCanvas.addEventListener("mouseleave", () => {
+    hoveredWeightKey = null;
+    weightPointer = null;
+    elements.weightTooltip.hidden = true;
+    if (!isAdvancedFamily()) drawNetwork();
+  });
+
   window.addEventListener("resize", drawAll);
 }
 
 setupPalette();
 setupArchitectureEvents();
+setupDataControls();
 setupControls();
+renderDataSourceControls();
 renderPalette();
 updateControlLabels();
 rebuildModel();
+updateResourceMonitor();
+setInterval(updateResourceMonitor, 1500);
 requestAnimationFrame(animationFrame);

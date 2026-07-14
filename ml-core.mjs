@@ -352,6 +352,11 @@ export class NeuralNetwork {
     return {
       input: input.slice(),
       layers: result.cache.map((entry) => entry.output.slice()),
+      details: result.cache.map((entry) => ({
+        input: entry.input.slice(),
+        z: entry.z.slice(),
+        output: entry.output.slice(),
+      })),
       output: result.output,
     };
   }
@@ -367,6 +372,8 @@ export class TrainingSession {
     learningRate = 0.03,
     batchSize = 24,
     seed = 11,
+    points = null,
+    validationRatio = 0.25,
   } = {}) {
     this.config = {
       dataset,
@@ -377,6 +384,8 @@ export class TrainingSession {
       learningRate,
       batchSize,
       seed,
+      points,
+      validationRatio,
     };
     this.reset();
   }
@@ -388,13 +397,22 @@ export class TrainingSession {
       hiddenLayers: (nextConfig.hiddenLayers ?? this.config.hiddenLayers).map((layer) => ({ ...layer })),
     };
     this.random = createRng(this.config.seed);
-    this.points = makeDataset(
-      this.config.dataset,
-      this.config.count,
-      this.config.noise,
-      this.config.seed,
+    this.points = this.config.points
+      ? this.config.points.map((point) => ({
+          input: point.input.slice(),
+          target: point.target,
+        }))
+      : makeDataset(
+          this.config.dataset,
+          this.config.count,
+          this.config.noise,
+          this.config.seed,
+        );
+    const split = splitDataset(
+      this.points,
+      this.config.validationRatio,
+      this.config.seed + 1,
     );
-    const split = splitDataset(this.points, 0.25, this.config.seed + 1);
     this.trainPoints = split.train;
     this.validationPoints = split.validation;
     this.network = new NeuralNetwork(this.config.hiddenLayers, this.config.seed + 2);

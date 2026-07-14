@@ -25,6 +25,35 @@ for (const family of ["cnn", "rnn"]) {
   session.dispose();
 }
 
+const customSequenceCount = 32;
+const customSequenceLength = 8;
+const customSequenceXs = new Float32Array(customSequenceCount * customSequenceLength);
+const customSequenceYs = new Float32Array(customSequenceCount);
+for (let sample = 0; sample < customSequenceCount; sample += 1) {
+  const label = sample % 2;
+  customSequenceYs[sample] = label;
+  for (let step = 0; step < customSequenceLength; step += 1) {
+    customSequenceXs[sample * customSequenceLength + step] =
+      label ? step / customSequenceLength : 1 - step / customSequenceLength;
+  }
+}
+const customRnn = new TfClassifierSession(tf, "rnn", cloneTemplate("rnn"), {
+  datasetData: {
+    count: customSequenceCount,
+    inputShape: [customSequenceLength, 1],
+    xs: customSequenceXs,
+    ys: customSequenceYs,
+  },
+  inputShape: [customSequenceLength, 1],
+  validationRatio: 0.25,
+  batchSize: 8,
+});
+await customRnn.step(1);
+assert.ok(Number.isFinite(customRnn.metrics().trainLoss));
+assert.deepEqual(customRnn.model.inputs[0].shape, [null, customSequenceLength, 1]);
+customRnn.dispose();
+console.log("rnn: uploaded tensor dataset and dynamic input shape passed");
+
 const deferredDisposeSession = new TfClassifierSession(
   tf,
   "cnn",

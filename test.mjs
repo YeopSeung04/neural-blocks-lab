@@ -55,3 +55,21 @@ for (const result of results) {
       `${result.afterLoss.toFixed(4)}, val accuracy ${(result.validationAccuracy * 100).toFixed(1)}%`,
   );
 }
+
+const uploadedPoints = Array.from({ length: 40 }, (_, index) => {
+  const x = index / 20 - 1;
+  const y = Math.sin(index) * 0.1;
+  return { input: [x, y], target: x > 0 ? 1 : 0 };
+});
+const uploadedSession = new TrainingSession({
+  points: uploadedPoints,
+  hiddenLayers: [],
+  validationRatio: 0.2,
+  learningRate: 0.04,
+  batchSize: 8,
+});
+assert.equal(uploadedSession.points.length, uploadedPoints.length);
+assert.equal(uploadedSession.validationPoints.length, 8);
+uploadedSession.step(200);
+assert.ok(Number.isFinite(uploadedSession.metrics().train.loss));
+console.log("uploaded MLP points: custom dataset split and training passed");

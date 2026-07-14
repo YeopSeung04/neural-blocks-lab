@@ -160,12 +160,13 @@ function addConfiguredLayer(tf, model, layer, inputShape, isFirst) {
   throw new Error(`TensorFlow.js builder does not support ${layer.type}`);
 }
 
-export function buildClassifier(tf, family, layers) {
+export function buildClassifier(tf, family, layers, inputShapeOverride = null) {
   const familyDefinition = MODEL_FAMILIES[family];
   if (!familyDefinition || family === "gan") {
     throw new Error(`Classifier family is not supported: ${family}`);
   }
-  const validation = validateArchitecture(familyDefinition.inputShape, layers);
+  const inputShape = inputShapeOverride ?? familyDefinition.inputShape;
+  const validation = validateArchitecture(inputShape, layers);
   if (!validation.valid) throw new Error(validation.error);
   if (validation.outputShape.length !== 1) {
     throw new Error(
@@ -175,12 +176,12 @@ export function buildClassifier(tf, family, layers) {
 
   const model = tf.sequential();
   layers.forEach((layer, index) => {
-    addConfiguredLayer(tf, model, layer, familyDefinition.inputShape, index === 0);
+    addConfiguredLayer(tf, model, layer, inputShape, index === 0);
   });
   model.add(tf.layers.dense({
     units: 1,
     activation: "sigmoid",
-    ...(layers.length === 0 ? { inputShape: familyDefinition.inputShape } : {}),
+    ...(layers.length === 0 ? { inputShape } : {}),
   }));
   return model;
 }

@@ -58,15 +58,55 @@ function makeRnnArrays(count, seed) {
   return { xs, ys };
 }
 
-function splitTensorDataset(tf, family, count, seed) {
-  const validationCount = Math.max(8, Math.floor(count * 0.2));
+function shuffleTensorArrays(data, inputShape, seed) {
+  const count = data.count;
+  const inputSize = inputShape.reduce((product, value) => product * value, 1);
+  if (data.xs.length !== count * inputSize || data.ys.length !== count) {
+    throw new Error("Uploaded tensor data shape does not match its sample count");
+  }
+  const random = seededRandom(seed);
+  const indices = Array.from({ length: count }, (_, index) => index);
+  for (let index = count - 1; index > 0; index -= 1) {
+    const target = Math.floor(random() * (index + 1));
+    [indices[index], indices[target]] = [indices[target], indices[index]];
+  }
+  const xs = new Float32Array(data.xs.length);
+  const ys = new Float32Array(count);
+  indices.forEach((sourceIndex, targetIndex) => {
+    const sourceOffset = sourceIndex * inputSize;
+    const targetOffset = targetIndex * inputSize;
+    xs.set(data.xs.slice(sourceOffset, sourceOffset + inputSize), targetOffset);
+    ys[targetIndex] = data.ys[sourceIndex];
+  });
+  return { xs, ys };
+}
+
+function splitTensorDataset(
+  tf,
+  family,
+  count,
+  seed,
+  validationRatio = 0.2,
+  datasetData = null,
+  inputShapeOverride = null,
+) {
+  const inputShape = inputShapeOverride ??
+    (family === "cnn" ? [8, 8, 1] : [12, 1]);
+  let data;
+  if (datasetData) {
+    count = datasetData.count;
+    data = shuffleTensorArrays(datasetData, inputShape, seed);
+  } else {
+    data = family === "cnn"
+      ? makeCnnArrays(count, seed)
+      : makeRnnArrays(count, seed);
+  }
+  const validationCount = Math.min(
+    count - 1,
+    Math.max(1, Math.floor(count * validationRatio)),
+  );
   const trainCount = count - validationCount;
-  const data = family === "cnn"
-    ? makeCnnArrays(count, seed)
-    : makeRnnArrays(count, seed);
-  const fullXs = family === "cnn"
-    ? tf.tensor4d(data.xs, [count, 8, 8, 1])
-    : tf.tensor3d(data.xs, [count, 12, 1]);
+  const fullXs = tf.tensor(data.xs, [count, ...inputShape]);
   const fullYs = tf.tensor2d(data.ys, [count, 1]);
   const trainXs = fullXs.slice([0, ...Array(fullXs.rank - 1).fill(0)], [trainCount, ...fullXs.shape.slice(1)]);
   const validationXs = fullXs.slice(
@@ -82,20 +122,38 @@ function splitTensorDataset(tf, family, count, seed) {
 
 export class TfClassifierSession {
   constructor(tf, family, layers, config = {}) {
-    const { model, ...trainingConfig } = config;
+    const {
+      model,
+      datasetData = null,
+      inputShape = null,
+      validationRatio = 0.2,
+      ...trainingConfig
+    } = config;
     this.tf = tf;
     this.family = family;
     this.layers = layers;
+    this.inputShape = inputShape ??
+      datasetData?.inputShape ??
+      (family === "cnn" ? [8, 8, 1] : [12, 1]);
     this.config = {
-      count: 160,
+      count: datasetData?.count ?? 160,
       optimizer: "adam",
       learningRate: 0.01,
       batchSize: 24,
       seed: 91,
+      validationRatio,
       ...trainingConfig,
     };
-    this.model = model ?? buildClassifier(tf, family, layers);
-    this.data = splitTensorDataset(tf, family, this.config.count, this.config.seed);
+    this.model = model ?? buildClassifier(tf, family, layers, this.inputShape);
+    this.data = splitTensorDataset(
+      tf,
+      family,
+      this.config.count,
+      this.config.seed,
+      this.config.validationRatio,
+      datasetData,
+      this.inputShape,
+    );
     this.history = [];
     this.epoch = 0;
     this.busy = false;

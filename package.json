@@ -4,12 +4,15 @@
   "type": "module",
   "scripts": {
     "test": "node test.mjs",
+    "test:data": "node data-pipeline-test.mjs",
     "test:catalog": "node catalog-test.mjs",
     "test:tf-training": "node tf-training-test.mjs",
-    "test:all": "npm test && npm run test:catalog && npm run test:tf-training",
-    "serve": "python3 -m http.server 8770 --bind 127.0.0.1"
+    "test:system": "python3 server_test.py",
+    "test:all": "npm test && npm run test:data && npm run test:catalog && npm run test:tf-training && npm run test:system",
+    "serve": "python3 server.py --bind 127.0.0.1 --port 8770"
   },
   "dependencies": {
-    "@tensorflow/tfjs": "4.22.0"
+    "@tensorflow/tfjs": "4.22.0",
+    "csv-parse": "7.0.1"
   }
 }

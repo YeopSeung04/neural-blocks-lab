@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Neural Blocks Lab</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=20260714-2">
 </head>
 <body>
   <header class="topbar">
@@ -75,7 +75,7 @@
       </div>
 
       <div class="visual-grid">
-        <div class="visual-card">
+        <div class="visual-card network-visual-card">
           <div class="card-heading">
             <div>
               <h2 id="networkVisualTitle">뉴런 활성화</h2>
@@ -84,6 +84,7 @@
             <span class="badge" id="probeValue">x: 0.20, y: -0.20</span>
           </div>
           <canvas id="networkCanvas"></canvas>
+          <div class="weight-tooltip" id="weightTooltip" hidden></div>
         </div>
 
         <div class="visual-card">
@@ -103,7 +104,47 @@
       <section>
         <div class="section-heading">
           <h2>데이터</h2>
+          <span id="dataPrivacyBadge">브라우저 처리</span>
         </div>
+        <label>
+          데이터 소스
+          <select id="dataSource">
+            <option value="builtIn">내장 교육 데이터</option>
+            <option value="csv">CSV · 표 데이터</option>
+            <option value="imageFolder">이미지 폴더</option>
+            <option value="timeSeries">시계열 CSV</option>
+          </select>
+        </label>
+        <div class="upload-controls" id="uploadControls" hidden>
+          <label id="fileInputRow">
+            파일 선택
+            <input id="dataFileInput" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values">
+          </label>
+          <label id="folderInputRow" hidden>
+            이미지 폴더 선택
+            <input id="imageFolderInput" type="file" accept="image/*" webkitdirectory directory multiple>
+          </label>
+          <div class="column-mapping" id="columnMapping" hidden>
+            <label id="feature1Row">
+              Feature X / Signal
+              <select id="featureColumn1"></select>
+            </label>
+            <label id="feature2Row">
+              Feature Y
+              <select id="featureColumn2"></select>
+            </label>
+            <label>
+              Target / Label
+              <select id="targetColumn"></select>
+            </label>
+          </div>
+          <div class="preprocess-pipeline" id="preprocessPipeline"></div>
+          <button class="primary" id="applyPreprocessing" type="button" disabled>
+            전처리 적용 및 학습 데이터 연결
+          </button>
+          <div class="data-summary" id="dataSummary">파일을 선택하세요.</div>
+        </div>
+        <div id="builtInDataControls">
         <label>
           데이터셋
           <select id="datasetType">
@@ -120,6 +161,7 @@
           노이즈 <output id="noiseValue">0.12</output>
           <input id="noise" type="range" min="0" max="0.4" step="0.01" value="0.12">
         </label>
+        </div>
       </section>
 
       <section>
@@ -186,6 +228,66 @@
     </aside>
   </main>
 
+  <section class="resource-monitor" aria-label="디바이스 자원 사용량">
+    <div class="resource-header">
+      <div>
+        <h2>디바이스 성능</h2>
+        <p>학습 중 시스템 자원과 TensorFlow.js 메모리 사용량</p>
+      </div>
+      <span class="badge" id="resourceStatus">측정 연결 중</span>
+    </div>
+    <div class="resource-grid">
+      <article class="resource-card">
+        <div class="resource-card-heading">
+          <strong>CPU</strong>
+          <span id="cpuValue">-</span>
+        </div>
+        <div class="resource-bar"><span id="cpuBar"></span></div>
+        <canvas class="resource-spark" id="cpuSpark"></canvas>
+        <small id="cpuDetail">논리 코어 확인 중</small>
+      </article>
+      <article class="resource-card">
+        <div class="resource-card-heading">
+          <strong>RAM</strong>
+          <span id="ramValue">-</span>
+        </div>
+        <div class="resource-bar"><span id="ramBar"></span></div>
+        <canvas class="resource-spark" id="ramSpark"></canvas>
+        <small id="ramDetail">시스템 메모리 확인 중</small>
+      </article>
+      <article class="resource-card">
+        <div class="resource-card-heading">
+          <strong>GPU</strong>
+          <span id="gpuValue">-</span>
+        </div>
+        <div class="resource-bar"><span id="gpuBar"></span></div>
+        <canvas class="resource-spark" id="gpuSpark"></canvas>
+        <small id="gpuDetail">GPU bridge 확인 중</small>
+      </article>
+      <article class="resource-card">
+        <div class="resource-card-heading">
+          <strong>VRAM / Unified</strong>
+          <span id="vramValue">-</span>
+        </div>
+        <div class="resource-bar"><span id="vramBar"></span></div>
+        <canvas class="resource-spark" id="vramSpark"></canvas>
+        <small id="vramDetail">그래픽 메모리 확인 중</small>
+      </article>
+      <article class="resource-card tf-resource-card">
+        <div class="resource-card-heading">
+          <strong>TensorFlow.js</strong>
+          <span id="tfBackendValue">-</span>
+        </div>
+        <dl class="tf-memory-list">
+          <div><dt>Tensors</dt><dd id="tfTensorCount">-</dd></div>
+          <div><dt>Tensor memory</dt><dd id="tfMemoryValue">-</dd></div>
+          <div><dt>JS heap</dt><dd id="jsHeapValue">-</dd></div>
+        </dl>
+        <small id="tfDetail">backend 초기화 확인 중</small>
+      </article>
+    </div>
+  </section>
+
   <template id="hiddenLayerTemplate">
     <article class="network-block hidden-block" draggable="true">
       <div class="drag-handle" title="드래그해서 순서 변경">::</div>
@@ -215,6 +317,6 @@
   </template>
 
   <script src="./node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=20260714-1"></script>
 </body>
 </html>
