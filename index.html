@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Neural Blocks Lab</title>
-  <link rel="stylesheet" href="./styles.css?v=20260715-2">
+  <link rel="stylesheet" href="./styles.css?v=20260715-3">
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +13,7 @@
       <p>블록으로 신경망을 구성하고 실제 학습 변화를 관찰합니다.</p>
     </div>
     <div class="run-controls" aria-label="학습 제어">
+      <button id="educationOpenButton" type="button">수업 운영</button>
       <span class="status-dot" id="statusDot"></span>
       <span class="status-text" id="trainingStatus">일시정지</span>
       <button class="primary" id="toggleTraining" type="button">학습 시작</button>
@@ -20,6 +21,164 @@
       <button id="resetTraining" type="button">초기화</button>
     </div>
   </header>
+
+  <dialog class="education-dialog" id="educationDialog">
+    <div class="education-dialog-shell">
+      <header class="education-dialog-header">
+        <div>
+          <span class="education-eyebrow">University classroom MVP</span>
+          <h2>교육 워크스페이스</h2>
+          <p>강좌, 과제, 실험 버전, 제출과 평가를 관리합니다.</p>
+        </div>
+        <button id="educationCloseButton" type="button" aria-label="교육 워크스페이스 닫기">닫기</button>
+      </header>
+
+      <div class="education-toolbar">
+        <label>
+          역할
+          <select id="educationRole">
+            <option value="professor">교수</option>
+            <option value="student">학생</option>
+          </select>
+        </label>
+        <label>
+          사용자 이름
+          <input id="educationActorName" type="text" value="김교수" maxlength="40">
+        </label>
+        <label>
+          현재 강좌
+          <select id="educationCourseSelect"></select>
+        </label>
+        <span class="badge" id="educationStorageBadge">브라우저 데모 저장</span>
+      </div>
+
+      <div class="education-status" id="educationStatus">
+        실제 인증 전 단계입니다. 이 브라우저의 localStorage에만 저장됩니다.
+      </div>
+
+      <section class="education-professor-tools" id="educationProfessorTools">
+        <form class="education-form" id="courseForm">
+          <div class="education-section-title">
+            <h3>강좌 만들기</h3>
+            <span>Professor</span>
+          </div>
+          <div class="education-form-grid">
+            <label>
+              강좌명
+              <input id="courseName" type="text" placeholder="AI 기초 실습" required>
+            </label>
+            <label>
+              강좌 코드
+              <input id="courseCode" type="text" placeholder="AI101" required>
+            </label>
+            <label>
+              학기
+              <input id="courseTerm" type="text" placeholder="2026-2" required>
+            </label>
+          </div>
+          <button class="primary" type="submit">강좌 생성</button>
+        </form>
+
+        <form class="education-form" id="assignmentForm">
+          <div class="education-section-title">
+            <h3>과제 만들기</h3>
+            <span>Starter experiment</span>
+          </div>
+          <div class="education-form-grid">
+            <label>
+              과제명
+              <input id="assignmentTitle" type="text" placeholder="XOR 분류 실습" required>
+            </label>
+            <label>
+              필수 모델
+              <select id="assignmentFamily">
+                <option value="any">제한 없음</option>
+                <option value="mlp">MLP / Dense</option>
+                <option value="cnn">CNN</option>
+                <option value="rnn">RNN / LSTM / GRU</option>
+                <option value="gan">GAN</option>
+              </select>
+            </label>
+            <label>
+              목표 Validation accuracy
+              <input id="assignmentTargetAccuracy" type="number" min="0" max="100" step="1" placeholder="80">
+            </label>
+            <label>
+              마감일
+              <input id="assignmentDueAt" type="datetime-local">
+            </label>
+            <label class="education-wide-field">
+              과제 설명
+              <textarea id="assignmentInstructions" rows="3" placeholder="학습 목표와 제출 조건을 입력하세요."></textarea>
+            </label>
+          </div>
+          <label class="inline-check">
+            <input id="assignmentIncludeStarter" type="checkbox" checked>
+            현재 신경망 상태를 시작 템플릿으로 포함
+          </label>
+          <button class="primary" type="submit">과제 생성</button>
+        </form>
+      </section>
+
+      <section class="education-student-tools" id="educationStudentTools" hidden>
+        <div class="education-form">
+          <div class="education-section-title">
+            <h3>현재 실험 저장·제출</h3>
+            <span>Student</span>
+          </div>
+          <div class="education-form-grid">
+            <label>
+              프로젝트 이름
+              <input id="studentProjectName" type="text" value="나의 AI 실험">
+            </label>
+            <label>
+              제출할 과제
+              <select id="studentAssignmentSelect"></select>
+            </label>
+          </div>
+          <div class="education-action-row">
+            <button id="saveCurrentProjectButton" type="button">현재 실험 저장</button>
+            <button id="loadAssignmentStarterButton" type="button">과제 시작 상태 불러오기</button>
+            <button class="primary" id="submitCurrentExperimentButton" type="button">현재 실험 제출</button>
+          </div>
+        </div>
+      </section>
+
+      <div class="education-board">
+        <section>
+          <div class="education-section-title">
+            <h3>과제</h3>
+            <span id="assignmentCount">0</span>
+          </div>
+          <div class="education-list" id="educationAssignmentsList"></div>
+        </section>
+        <section>
+          <div class="education-section-title">
+            <h3>프로젝트</h3>
+            <span id="projectCount">0</span>
+          </div>
+          <div class="education-list" id="educationProjectsList"></div>
+        </section>
+        <section>
+          <div class="education-section-title">
+            <h3>제출 및 평가</h3>
+            <span id="submissionCount">0</span>
+          </div>
+          <div class="education-list" id="educationSubmissionsList"></div>
+        </section>
+      </div>
+
+      <footer class="education-dialog-footer">
+        <button id="exportEducationDataButton" type="button">수업 데이터 JSON 내보내기</button>
+        <button id="resetEducationDataButton" type="button">교육 데모 초기화</button>
+        <label class="file-button">
+          JSON 가져오기
+          <input id="importEducationDataInput" type="file" accept="application/json,.json">
+        </label>
+        <span>프로덕션에서는 대학 SSO·LTI·서버 DB로 교체됩니다.</span>
+      </footer>
+    </div>
+  </dialog>
 
   <main class="app-shell">
     <aside class="left-panel">
@@ -413,6 +572,6 @@
   </template>
 
   <script src="./node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
-  <script type="module" src="./app.js?v=20260715-4"></script>
+  <script type="module" src="./app.js?v=20260715-6"></script>
 </body>
 </html>

@@ -55,6 +55,13 @@ http://127.0.0.1:8770
 - 가중치 hover 시 `activation x weight`, bias, `z`, activation output 표시
 - CPU, RAM, GPU, VRAM 또는 unified memory 실시간 모니터
 - TensorFlow.js backend, tensor 개수, tensor memory, JS heap 표시
+- 교수·학생 역할 전환형 교육 워크스페이스
+- 강좌와 과제 생성, 현재 실험을 과제 시작 템플릿으로 저장
+- 학생 실험 프로젝트 버전 저장과 과제 제출
+- 모델 패밀리와 목표 accuracy 자동 조건 검사
+- 교수 점수·피드백 입력과 학생 제출 이력
+- 수업 운영 데이터 JSON 백업·복원
+- 교육 데모 데이터를 기본 강좌 상태로 초기화
 
 ## 사용자 데이터
 
@@ -101,6 +108,30 @@ dataset/
 - 샘플: `samples/time_series_binary.csv`
 
 현재 사용자 데이터 학습은 이진 분류를 지원합니다. Wizard의 다중 분류와 회귀 항목은 지원 범위를 오해하지 않도록 비활성 상태로 표시합니다.
+
+## 교육 운영 MVP
+
+상단 `수업 운영` 버튼에서 대학 수업 흐름을 시험할 수 있습니다.
+
+### 교수 모드
+
+- 강좌명, 강좌 코드, 학기 설정
+- 과제 설명, 마감일, 필수 모델 패밀리, 목표 validation accuracy 설정
+- 현재 신경망 구조를 과제 시작 템플릿으로 포함
+- 학생 제출 결과와 자동 조건 검사 확인
+- 0-100점 점수와 교수 피드백 저장
+
+### 학생 모드
+
+- 현재 신경망 구조, optimizer, 데이터 설정, 학습 지표를 프로젝트로 저장
+- 같은 프로젝트의 여러 버전 저장
+- 과제 시작 템플릿 불러오기
+- 현재 실험을 과제에 제출
+- 제출 시도, 점수와 교수 피드백 확인
+
+현재 교육 운영 데이터는 브라우저 `localStorage`에 저장됩니다. JSON 백업과 복원은 가능하지만 실제 사용자 인증, 대학별 tenant 분리, 학생 명단, 서버 데이터베이스, LTI 연동은 아직 구현되지 않았습니다.
+
+사용자가 업로드한 CSV와 이미지 원본은 실험 Snapshot에 포함하지 않습니다. Snapshot에는 모델 구조, 학습 설정, 데이터 요약과 지표만 저장되며 원본 데이터는 복원 시 다시 선택해야 합니다.
 
 ## 디바이스 성능 측정
 
@@ -189,6 +220,8 @@ npm run test:all
 `test.mjs`는 선형, XOR, 원형 데이터에서 학습 전후 손실 감소와 validation accuracy를 확인합니다.
 
 `data-pipeline-test.mjs`는 CSV parsing, 다중 feature, Train-only scaling, 명시적 train/validation/test 분할, binary label mapping, timestamp 정렬, 시계열 window, 이미지 폴더 label 구조를 검증합니다.
+
+`education-store-test.mjs`는 강좌·과제 생성, 프로젝트 버전 저장, 제출 자동 검사, 교수 채점, JSON 백업·복원을 검증합니다.
 
 `catalog-test.mjs`는 다음을 검증합니다.
 

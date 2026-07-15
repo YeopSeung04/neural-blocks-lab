@@ -15,6 +15,7 @@ import {
   GanTrainingSession,
   TfClassifierSession,
 } from "./tf-training.mjs";
+import { mountEducationWorkspace } from "./education-ui.mjs";
 import {
   parseCsvText,
   prepareImageDataset,
@@ -1867,6 +1868,137 @@ function drawAdvancedVisuals() {
   );
 }
 
+function finiteOrNull(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function serializeLayer(layer) {
+  return Object.fromEntries(
+    Object.entries(layer).filter(([key]) => key !== "id"),
+  );
+}
+
+function captureExperimentSnapshot() {
+  const family = elements.modelFamily.value;
+  let result;
+  if (isAdvancedFamily()) {
+    const metrics = advancedTrainingSession?.metrics?.() ?? {};
+    result = {
+      epoch: metrics.epoch ?? 0,
+      trainLoss: finiteOrNull(metrics.trainLoss),
+      validationLoss: finiteOrNull(metrics.validationLoss),
+      trainAccuracy: finiteOrNull(metrics.trainAccuracy),
+      validationAccuracy: finiteOrNull(metrics.validationAccuracy),
+      testLoss: null,
+      testAccuracy: null,
+    };
+  } else {
+    const metrics = session?.metrics?.() ?? {};
+    result = {
+      epoch: metrics.epoch ?? 0,
+      trainLoss: finiteOrNull(metrics.train?.loss),
+      validationLoss: finiteOrNull(metrics.validation?.loss),
+      testLoss: finiteOrNull(metrics.test?.loss),
+      trainAccuracy: finiteOrNull(metrics.train?.accuracy),
+      validationAccuracy: finiteOrNull(metrics.validation?.accuracy),
+      testAccuracy: finiteOrNull(metrics.test?.accuracy),
+    };
+  }
+  const model = {
+    family,
+    parameterCount: isAdvancedFamily()
+      ? advancedCompileInfo?.parameterCount ?? 0
+      : parameterCount(),
+    activeGanBranch,
+  };
+  if (family === "mlp") {
+    model.hiddenLayers = hiddenLayers.map(serializeLayer);
+  } else if (family === "gan") {
+    model.ganBranches = {
+      generator: advancedArchitectures.gan.generator.map(serializeLayer),
+      discriminator: advancedArchitectures.gan.discriminator.map(serializeLayer),
+    };
+  } else {
+    model.layers = advancedArchitectures[family].map(serializeLayer);
+  }
+  return {
+    schemaVersion: 1,
+    savedAt: new Date().toISOString(),
+    model,
+    training: {
+      optimizer: elements.optimizer.value,
+      learningRate: Number(elements.learningRate.value),
+      batchSize: Number(elements.batchSize.value),
+      trainingSpeed: Number(elements.trainingSpeed.value),
+      maxEpochs: Number(elements.maxEpochs.value),
+    },
+    dataset: {
+      source: elements.dataSource.value,
+      name: activeDatasetName(),
+      datasetType: elements.datasetType.value,
+      dataCount: Number(elements.dataCount.value),
+      noise: Number(elements.noise.value),
+      uploaded: Boolean(activeUserDataset),
+      summary: activeUserDataset?.summary ?? null,
+      rawDataIncluded: false,
+    },
+    result,
+  };
+}
+
+function restoreExperimentSnapshot(snapshot) {
+  if (!snapshot?.model?.family) throw new Error("실험 Snapshot의 모델 정보가 없습니다.");
+  const family = snapshot.model.family;
+  if (!MODEL_FAMILIES[family]) throw new Error(`지원하지 않는 모델 패밀리: ${family}`);
+  running = false;
+  activeUserDataset = null;
+  parsedUpload = null;
+  selectedImageFiles = [];
+  uploadedDataName = "";
+  elements.dataSource.value = "builtIn";
+  elements.dataFileInput.value = "";
+  elements.imageFolderInput.value = "";
+  elements.modelFamily.value = family;
+  elements.optimizer.value = snapshot.training?.optimizer ?? "adam";
+  elements.learningRate.value = String(snapshot.training?.learningRate ?? familyLearningRates[family]);
+  elements.batchSize.value = String(snapshot.training?.batchSize ?? 24);
+  elements.trainingSpeed.value = String(snapshot.training?.trainingSpeed ?? 1);
+  elements.maxEpochs.value = String(snapshot.training?.maxEpochs ?? 400);
+  elements.datasetType.value = snapshot.dataset?.datasetType ?? "xor";
+  elements.dataCount.value = String(snapshot.dataset?.dataCount ?? 240);
+  elements.noise.value = String(snapshot.dataset?.noise ?? 0.12);
+  activeGanBranch = snapshot.model.activeGanBranch ?? "generator";
+
+  if (family === "mlp") {
+    hiddenLayers = (snapshot.model.hiddenLayers ?? []).map((layer) => ({
+      ...layer,
+      id: crypto.randomUUID(),
+    }));
+  } else if (family === "gan") {
+    for (const branch of ["generator", "discriminator"]) {
+      const saved = snapshot.model.ganBranches?.[branch];
+      if (saved?.length) {
+        advancedArchitectures.gan[branch] = saved.map((layer) =>
+          createLayer(layer.type, { ...layer, id: crypto.randomUUID() }));
+      }
+    }
+  } else if (snapshot.model.layers?.length) {
+    advancedArchitectures[family] = snapshot.model.layers.map((layer) =>
+      createLayer(layer.type, { ...layer, id: crypto.randomUUID() }));
+  }
+
+  renderDataSourceControls();
+  renderPalette();
+  if (family === "mlp") rebuildModel();
+  else rebuildAdvancedStudio();
+  const requiresData = snapshot.dataset?.uploaded;
+  const message = requiresData
+    ? "모델과 학습 설정을 복원했습니다. 업로드 원본 데이터는 저장되지 않으므로 다시 선택해야 합니다."
+    : "모델, 데이터 설정과 학습 파라미터를 복원했습니다.";
+  setStatus(message, false);
+  return message;
+}
+
 function drawAll() {
   if (isAdvancedFamily()) {
     drawAdvancedVisuals();
@@ -2473,6 +2605,10 @@ renderDataSourceControls();
 renderPalette();
 updateControlLabels();
 rebuildModel();
+mountEducationWorkspace({
+  captureExperiment: captureExperimentSnapshot,
+  restoreExperiment: restoreExperimentSnapshot,
+});
 updateResourceMonitor();
 setInterval(updateResourceMonitor, 1500);
 requestAnimationFrame(animationFrame);
