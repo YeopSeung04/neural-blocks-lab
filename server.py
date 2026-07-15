@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
 import argparse
+import hmac
 import json
 import os
 import platform
 import re
 import shutil
 import subprocess
+import threading
 import time
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+from backend import ApiError, NeuralBlocksBackend
 
 ROOT = Path(__file__).resolve().parent
+DATABASE_PATH = Path(
+    os.environ.get("NBL_DATABASE_PATH", ROOT / ".data" / "neural_blocks.db")
+)
+AUTH_WINDOW_SECONDS = 15 * 60
+AUTH_MAX_ATTEMPTS = 12
+AUTH_ATTEMPTS = {}
+AUTH_ATTEMPTS_LOCK = threading.Lock()
 
 try:
     import psutil
@@ -231,24 +244,269 @@ def collect_metrics():
     }
 
 
+BACKEND = NeuralBlocksBackend(DATABASE_PATH)
+
+
+def allow_auth_attempt(key):
+    now = time.time()
+    with AUTH_ATTEMPTS_LOCK:
+        recent = [
+            attempt for attempt in AUTH_ATTEMPTS.get(key, [])
+            if now - attempt < AUTH_WINDOW_SECONDS
+        ]
+        if len(recent) >= AUTH_MAX_ATTEMPTS:
+            AUTH_ATTEMPTS[key] = recent
+            return False
+        recent.append(now)
+        AUTH_ATTEMPTS[key] = recent
+        return True
+
+
 class NeuralBlocksHandler(SimpleHTTPRequestHandler):
+    backend = BACKEND
+    max_json_bytes = 2 * 1024 * 1024
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=(), payment=()",
+        )
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self'; "
+            "worker-src 'self' blob:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'self'",
+        )
+        super().end_headers()
+
+    def api_path(self):
+        return urlparse(self.path).path
+
+    def protected_static_path(self, path):
+        decoded = unquote(path).replace("\\", "/")
+        parts = [part for part in decoded.split("/") if part not in ("", ".")]
+        if any(part in {".data", ".git", "__pycache__"} for part in parts):
+            return True
+        filename = parts[-1].lower() if parts else ""
+        return filename.endswith((".db", ".db-shm", ".db-wal", ".py", ".pyc"))
+
+    def send_json(self, status, data, headers=None):
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        for key, value in headers or []:
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def read_json(self):
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" not in content_type:
+            raise ApiError(415, "Content-Type must be application/json", "unsupported_media_type")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ApiError(400, "Invalid Content-Length", "invalid_request")
+        if length <= 0:
+            return {}
+        if length > self.max_json_bytes:
+            raise ApiError(413, "JSON request body is too large", "payload_too_large")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ApiError(400, "Request body must be valid JSON", "invalid_json")
+        if not isinstance(payload, dict):
+            raise ApiError(400, "JSON request body must be an object", "invalid_json")
+        return payload
+
+    def session_token(self):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return None
+        value = cookie.get("nbl_session")
+        return value.value if value else None
+
+    def require_auth(self):
+        return self.backend.authenticate(self.session_token())
+
+    def require_csrf(self, auth):
+        provided = self.headers.get("X-CSRF-Token", "")
+        expected = auth.get("csrfToken", "")
+        if not provided or not hmac.compare_digest(provided, expected):
+            raise ApiError(403, "CSRF token is invalid", "csrf_failed")
+
+    def session_cookie(self, token, clear=False):
+        parts = [
+            f"nbl_session={'' if clear else token}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Lax",
+            f"Max-Age={0 if clear else 7 * 24 * 60 * 60}",
+        ]
+        if os.environ.get("NBL_SECURE_COOKIES") == "1":
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def auth_rate_key(self, payload):
+        email = str(payload.get("email") or "").strip().lower()
+        return f"{self.client_address[0]}:{email}"
+
+    def handle_api_error(self, error):
+        self.send_json(
+            error.status,
+            {"error": {"code": error.code, "message": error.message}},
+        )
+
     def do_GET(self):
-        if self.path == "/api/system-metrics":
-            payload = json.dumps(collect_metrics()).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(payload)
+        path = self.api_path()
+        if path == "/api/system-metrics":
+            self.send_json(200, collect_metrics())
+            return
+        if path == "/api/health":
+            self.send_json(200, {"status": "ok", "database": "sqlite"})
+            return
+        if path.startswith("/api/"):
+            try:
+                auth = self.require_auth()
+                if path == "/api/auth/me":
+                    self.send_json(200, auth)
+                    return
+                if path == "/api/courses":
+                    self.send_json(200, {"courses": self.backend.list_courses(auth)})
+                    return
+                match = re.fullmatch(r"/api/courses/([^/]+)/assignments", path)
+                if match:
+                    self.send_json(
+                        200,
+                        {"assignments": self.backend.list_assignments(auth, match.group(1))},
+                    )
+                    return
+                match = re.fullmatch(r"/api/courses/([^/]+)/projects", path)
+                if match:
+                    self.send_json(
+                        200,
+                        {"projects": self.backend.list_projects(auth, match.group(1))},
+                    )
+                    return
+                match = re.fullmatch(r"/api/courses/([^/]+)/submissions", path)
+                if match:
+                    self.send_json(
+                        200,
+                        {"submissions": self.backend.list_submissions(auth, match.group(1))},
+                    )
+                    return
+                match = re.fullmatch(r"/api/projects/([^/]+)", path)
+                if match:
+                    self.send_json(200, {"project": self.backend.get_project(auth, match.group(1))})
+                    return
+                raise ApiError(404, "API endpoint was not found", "not_found")
+            except ApiError as error:
+                self.handle_api_error(error)
+            except Exception as error:
+                self.log_error("Unhandled API GET error: %s", error)
+                self.send_json(500, {"error": {"code": "server_error", "message": "Internal server error"}})
+            return
+        if self.protected_static_path(path):
+            self.send_error(404, "Not Found")
             return
         super().do_GET()
 
+    def do_HEAD(self):
+        path = self.api_path()
+        if path.startswith("/api/") or self.protected_static_path(path):
+            self.send_error(404, "Not Found")
+            return
+        super().do_HEAD()
+
+    def do_POST(self):
+        path = self.api_path()
+        if not path.startswith("/api/"):
+            self.send_error(405, "Method Not Allowed")
+            return
+        try:
+            payload = self.read_json()
+            if path in ("/api/auth/register", "/api/auth/login"):
+                key = self.auth_rate_key(payload)
+                if not allow_auth_attempt(key):
+                    raise ApiError(429, "Too many authentication attempts", "rate_limited")
+                auth = self.backend.register(payload) if path.endswith("register") else self.backend.login(payload)
+                token = auth.pop("sessionToken")
+                self.send_json(
+                    201 if path.endswith("register") else 200,
+                    auth,
+                    [("Set-Cookie", self.session_cookie(token))],
+                )
+                return
+
+            auth = self.require_auth()
+            self.require_csrf(auth)
+            if path == "/api/auth/logout":
+                self.backend.logout(self.session_token())
+                self.send_json(
+                    200,
+                    {"status": "logged_out"},
+                    [("Set-Cookie", self.session_cookie("", clear=True))],
+                )
+                return
+            if path == "/api/courses":
+                self.send_json(201, {"course": self.backend.create_course(auth, payload)})
+                return
+            if path == "/api/courses/join":
+                self.send_json(200, {"course": self.backend.join_course(auth, payload)})
+                return
+            match = re.fullmatch(r"/api/courses/([^/]+)/assignments", path)
+            if match:
+                self.send_json(
+                    201,
+                    {"assignment": self.backend.create_assignment(auth, match.group(1), payload)},
+                )
+                return
+            match = re.fullmatch(r"/api/courses/([^/]+)/projects", path)
+            if match:
+                self.send_json(
+                    201,
+                    {"project": self.backend.save_project(auth, match.group(1), payload)},
+                )
+                return
+            match = re.fullmatch(r"/api/assignments/([^/]+)/submissions", path)
+            if match:
+                self.send_json(
+                    201,
+                    {"submission": self.backend.submit_assignment(auth, match.group(1), payload)},
+                )
+                return
+            match = re.fullmatch(r"/api/submissions/([^/]+)/grade", path)
+            if match:
+                self.send_json(
+                    200,
+                    {"submission": self.backend.grade_submission(auth, match.group(1), payload)},
+                )
+                return
+            raise ApiError(404, "API endpoint was not found", "not_found")
+        except ApiError as error:
+            self.handle_api_error(error)
+        except Exception as error:
+            self.log_error("Unhandled API POST error: %s", error)
+            self.send_json(500, {"error": {"code": "server_error", "message": "Internal server error"}})
+
     def log_message(self, format_string, *args):
-        if self.path != "/api/system-metrics":
+        if self.api_path() not in ("/api/system-metrics", "/api/health"):
             super().log_message(format_string, *args)
 
 
@@ -259,6 +517,8 @@ def main():
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.bind, args.port), NeuralBlocksHandler)
     print(f"Neural Blocks Lab: http://{args.bind}:{args.port}")
+    print(f"Classroom database: {DATABASE_PATH}")
+    print("Authentication endpoints: /api/auth/register, /api/auth/login, /api/auth/me")
     print("System metrics endpoint: /api/system-metrics")
     try:
         server.serve_forever()

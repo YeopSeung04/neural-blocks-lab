@@ -55,13 +55,15 @@ http://127.0.0.1:8770
 - 가중치 hover 시 `activation x weight`, bias, `z`, activation output 표시
 - CPU, RAM, GPU, VRAM 또는 unified memory 실시간 모니터
 - TensorFlow.js backend, tensor 개수, tensor memory, JS heap 표시
-- 교수·학생 역할 전환형 교육 워크스페이스
+- 실제 계정 로그인과 대학별 tenant 격리
+- HttpOnly 세션 쿠키, CSRF 검증, 인증 요청 rate limit
+- 대학 관리자·교수·학생 역할 기반 접근 제어
+- 대학 가입 코드와 강좌 가입 코드
 - 강좌와 과제 생성, 현재 실험을 과제 시작 템플릿으로 저장
 - 학생 실험 프로젝트 버전 저장과 과제 제출
 - 모델 패밀리와 목표 accuracy 자동 조건 검사
 - 교수 점수·피드백 입력과 학생 제출 이력
-- 수업 운영 데이터 JSON 백업·복원
-- 교육 데모 데이터를 기본 강좌 상태로 초기화
+- SQLite 기반 강좌·과제·프로젝트·제출 영구 저장
 
 ## 사용자 데이터
 
@@ -113,23 +115,32 @@ dataset/
 
 상단 `수업 운영` 버튼에서 대학 수업 흐름을 시험할 수 있습니다.
 
-### 교수 모드
+### 대학 관리자·교수
 
+- 새 대학 워크스페이스 개설
+- 대학 가입 코드 확인
+- 강좌 생성과 강좌별 학생 가입 코드 발급
 - 강좌명, 강좌 코드, 학기 설정
 - 과제 설명, 마감일, 필수 모델 패밀리, 목표 validation accuracy 설정
 - 현재 신경망 구조를 과제 시작 템플릿으로 포함
 - 학생 제출 결과와 자동 조건 검사 확인
 - 0-100점 점수와 교수 피드백 저장
 
-### 학생 모드
+### 학생
 
+- 대학 가입 코드로 계정 생성
+- 강좌 가입 코드로 수업 참여
 - 현재 신경망 구조, optimizer, 데이터 설정, 학습 지표를 프로젝트로 저장
 - 같은 프로젝트의 여러 버전 저장
 - 과제 시작 템플릿 불러오기
 - 현재 실험을 과제에 제출
 - 제출 시도, 점수와 교수 피드백 확인
 
-현재 교육 운영 데이터는 브라우저 `localStorage`에 저장됩니다. JSON 백업과 복원은 가능하지만 실제 사용자 인증, 대학별 tenant 분리, 학생 명단, 서버 데이터베이스, LTI 연동은 아직 구현되지 않았습니다.
+교육 운영 데이터는 `.data/neural_blocks.db` SQLite 데이터베이스에 저장됩니다. 모든 강좌·과제·프로젝트·제출 쿼리는 로그인 사용자의 `tenant_id`로 제한되며, 학생에게는 대학·강좌 가입 코드가 다시 노출되지 않습니다.
+
+비밀번호는 PBKDF2-HMAC-SHA256으로 해시하고 세션 원문은 데이터베이스에 저장하지 않습니다. 브라우저 세션은 JavaScript가 읽을 수 없는 HttpOnly 쿠키를 사용하며, 데이터 변경 API는 별도 CSRF 토큰을 확인합니다.
+
+현재 구현은 단일 서버 MVP입니다. 실제 대학 서비스 배포 전에는 HTTPS와 `NBL_SECURE_COOKIES=1`, 이메일 인증·비밀번호 재설정, 관리자용 교수 초대, 감사 로그, PostgreSQL 마이그레이션, SSO/OIDC·LTI 1.3 연동이 추가로 필요합니다.
 
 사용자가 업로드한 CSV와 이미지 원본은 실험 Snapshot에 포함하지 않습니다. Snapshot에는 모델 구조, 학습 설정, 데이터 요약과 지표만 저장되며 원본 데이터는 복원 시 다시 선택해야 합니다.
 
@@ -221,7 +232,11 @@ npm run test:all
 
 `data-pipeline-test.mjs`는 CSV parsing, 다중 feature, Train-only scaling, 명시적 train/validation/test 분할, binary label mapping, timestamp 정렬, 시계열 window, 이미지 폴더 label 구조를 검증합니다.
 
-`education-store-test.mjs`는 강좌·과제 생성, 프로젝트 버전 저장, 제출 자동 검사, 교수 채점, JSON 백업·복원을 검증합니다.
+`education-api-test.mjs`는 API 클라이언트의 same-origin 요청과 CSRF 헤더, 서버 오류 변환을 검증합니다.
+
+`backend_test.py`는 계정 생성과 로그인, 두 대학 tenant 격리, 학생의 대학·강좌 가입, 프로젝트 버전, 제출 자동 검사와 채점을 검증합니다.
+
+`server_api_test.py`는 실제 HTTP 서버에서 HttpOnly·SameSite 세션 쿠키, CSRF 차단, 인증 세션 종료를 검증합니다.
 
 `catalog-test.mjs`는 다음을 검증합니다.
 

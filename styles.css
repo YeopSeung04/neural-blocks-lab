@@ -52,6 +52,8 @@ button,
 select,
 input[type="number"],
 input[type="text"],
+input[type="email"],
+input[type="password"],
 input[type="datetime-local"],
 textarea {
   border: 1px solid var(--border);
@@ -96,6 +98,8 @@ button.danger {
 select,
 input[type="number"],
 input[type="text"],
+input[type="email"],
+input[type="password"],
 input[type="datetime-local"],
 textarea {
   width: 100%;
@@ -166,6 +170,14 @@ output {
   font-size: 13px;
 }
 
+.account-badge {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-dialog,
 .education-dialog {
   width: min(1180px, calc(100vw - 24px));
   max-width: none;
@@ -179,16 +191,28 @@ output {
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
 }
 
+.auth-dialog {
+  width: min(860px, calc(100vw - 24px));
+}
+
+.auth-dialog::backdrop,
 .education-dialog::backdrop {
   background: rgba(4, 8, 13, 0.78);
 }
 
+.auth-dialog-shell,
 .education-dialog-shell {
   display: grid;
   gap: 12px;
   max-height: calc(100vh - 26px);
   padding: 14px;
   overflow-y: auto;
+}
+
+.auth-grid {
+  display: grid;
+  grid-template-columns: 0.8fr 1.2fr;
+  gap: 12px;
 }
 
 .education-dialog-header,
@@ -237,11 +261,48 @@ output {
 
 .education-toolbar {
   display: grid;
-  grid-template-columns: 0.8fr 1fr 1.4fr auto;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(180px, 1.5fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
+}
+
+.education-identity,
+.education-code {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.education-identity span,
+.education-code span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.education-identity strong,
+.education-identity small,
+.education-code code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.education-identity strong {
+  font-size: 12px;
+}
+
+.education-identity small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.education-code code {
+  color: var(--cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }
 
 .education-status {
@@ -275,6 +336,8 @@ output {
 
 .education-student-tools {
   display: grid;
+  grid-template-columns: minmax(220px, 0.55fr) minmax(0, 1.45fr);
+  gap: 10px;
 }
 
 .education-form,
@@ -416,14 +479,13 @@ output {
   position: sticky;
   bottom: -14px;
   z-index: 4;
-  justify-content: flex-start;
+  justify-content: flex-end;
   padding: 10px 0;
   border-top: 1px solid var(--border);
   background: rgba(13, 17, 23, 0.97);
 }
 
 .education-dialog-footer span {
-  margin-left: auto;
   color: var(--muted);
   font-size: 9px;
 }
@@ -1343,7 +1405,9 @@ canvas {
   }
 
   .education-toolbar,
+  .auth-grid,
   .education-professor-tools,
+  .education-student-tools,
   .education-board {
     grid-template-columns: 1fr 1fr;
   }
@@ -1403,13 +1467,21 @@ canvas {
     max-height: calc(100vh - 12px);
   }
 
+  .auth-dialog {
+    width: calc(100vw - 12px);
+    max-height: calc(100vh - 12px);
+  }
+
+  .auth-dialog-shell,
   .education-dialog-shell {
     max-height: calc(100vh - 14px);
     padding: 10px;
   }
 
   .education-toolbar,
+  .auth-grid,
   .education-professor-tools,
+  .education-student-tools,
   .education-board,
   .education-form-grid,
   .education-item-actions,

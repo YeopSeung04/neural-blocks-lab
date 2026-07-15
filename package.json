@@ -5,11 +5,13 @@
   "scripts": {
     "test": "node test.mjs",
     "test:data": "node data-pipeline-test.mjs",
-    "test:education": "node education-store-test.mjs",
+    "test:education": "node education-api-test.mjs",
+    "test:backend": "python3 backend_test.py",
+    "test:api": "python3 server_api_test.py",
     "test:catalog": "node catalog-test.mjs",
     "test:tf-training": "node tf-training-test.mjs",
     "test:system": "python3 server_test.py",
-    "test:all": "npm test && npm run test:data && npm run test:education && npm run test:catalog && npm run test:tf-training && npm run test:system",
+    "test:all": "npm test && npm run test:data && npm run test:education && npm run test:backend && npm run test:api && npm run test:catalog && npm run test:tf-training && npm run test:system",
     "serve": "python3 server.py --bind 127.0.0.1 --port 8770"
   },
   "dependencies": {

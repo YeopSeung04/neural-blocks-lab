@@ -1,4 +1,5 @@
 import { TrainingSession } from "./ml-core.mjs";
+import * as tfjs from "./node_modules/@tensorflow/tfjs/dist/tf.fesm.min.js";
 import {
   LAYER_CATALOG,
   MODEL_FAMILIES,
@@ -470,7 +471,7 @@ function disposeAdvancedTrainingSession() {
 function createAdvancedTrainingSession() {
   disposeAdvancedTrainingSession();
   if (advancedCompileInfo?.error) return;
-  const tf = globalThis.tf;
+  const tf = tfjs;
   const family = elements.modelFamily.value;
   const config = {
     count: Number(elements.dataCount.value),
@@ -495,7 +496,7 @@ function createAdvancedTrainingSession() {
 }
 
 function compileAdvancedArchitecture() {
-  const tf = globalThis.tf;
+  const tf = tfjs;
   const family = elements.modelFamily.value;
   const layers = activeAdvancedLayers();
   const validation = validateArchitecture(advancedInputShape(), layers);
@@ -2063,9 +2064,10 @@ function setResourceBar(bar, value) {
 }
 
 function updateTensorFlowMetrics() {
-  const tf = globalThis.tf;
-  if (!tf) {
+  const tf = tfjs;
+  if (typeof tf.memory !== "function" || typeof tf.getBackend !== "function") {
     elements.tfBackendValue.textContent = "unavailable";
+    elements.tfDetail.textContent = "TensorFlow.js memory API를 사용할 수 없습니다.";
     return;
   }
   const memory = tf.memory();
@@ -2136,7 +2138,7 @@ async function updateResourceMonitor() {
       ? `JS heap ${formatBytes(heap.usedJSHeapSize)} / ${formatBytes(heap.jsHeapSizeLimit)}`
       : `deviceMemory 약 ${navigator.deviceMemory ?? "-"} GB · 실제 사용률 제한`;
     elements.gpuValue.textContent = "N/A";
-    elements.gpuDetail.textContent = `${globalThis.tf?.getBackend?.() ?? "GPU"} backend · 사용률 API 제한`;
+    elements.gpuDetail.textContent = `${tfjs.getBackend?.() ?? "GPU"} backend · 사용률 API 제한`;
     elements.vramValue.textContent = "N/A";
     elements.vramDetail.textContent = "브라우저는 실제 VRAM 사용량을 제공하지 않음";
     setResourceBar(elements.cpuBar, mainThreadLoad);

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Neural Blocks Lab</title>
-  <link rel="stylesheet" href="./styles.css?v=20260715-3">
+  <link rel="stylesheet" href="./styles.css?v=20260715-4">
 </head>
 <body>
   <header class="topbar">
@@ -14,6 +14,7 @@
     </div>
     <div class="run-controls" aria-label="학습 제어">
       <button id="educationOpenButton" type="button">수업 운영</button>
+      <span class="badge account-badge" id="accountBadge">로그인 필요</span>
       <span class="status-dot" id="statusDot"></span>
       <span class="status-text" id="trainingStatus">일시정지</span>
       <button class="primary" id="toggleTraining" type="button">학습 시작</button>
@@ -21,6 +22,86 @@
       <button id="resetTraining" type="button">초기화</button>
     </div>
   </header>
+
+  <dialog class="auth-dialog" id="authDialog">
+    <div class="auth-dialog-shell">
+      <header class="education-dialog-header">
+        <div>
+          <span class="education-eyebrow">Secure classroom access</span>
+          <h2>대학 계정 로그인</h2>
+          <p>세션은 HttpOnly 쿠키로 관리되며 비밀번호는 서버에서 해시 처리됩니다.</p>
+        </div>
+        <button id="authCloseButton" type="button" aria-label="로그인 창 닫기">닫기</button>
+      </header>
+
+      <div class="auth-grid">
+        <form class="education-form" id="loginForm">
+          <div class="education-section-title">
+            <h3>로그인</h3>
+            <span>Existing account</span>
+          </div>
+          <label>
+            이메일
+            <input id="loginEmail" type="email" autocomplete="email" required>
+          </label>
+          <label>
+            비밀번호
+            <input id="loginPassword" type="password" autocomplete="current-password" minlength="10" required>
+          </label>
+          <button class="primary" type="submit">로그인</button>
+        </form>
+
+        <form class="education-form" id="registerForm">
+          <div class="education-section-title">
+            <h3>계정 만들기</h3>
+            <span>University tenant</span>
+          </div>
+          <label>
+            가입 방식
+            <select id="registrationMode">
+              <option value="create">새 대학 워크스페이스 개설</option>
+              <option value="join">기존 대학에 학생으로 가입</option>
+            </select>
+          </label>
+          <div class="education-form-grid">
+            <label>
+              이름
+              <input id="registerDisplayName" type="text" autocomplete="name" maxlength="80" required>
+            </label>
+            <label>
+              이메일
+              <input id="registerEmail" type="email" autocomplete="email" required>
+            </label>
+            <label class="education-wide-field">
+              비밀번호
+              <input id="registerPassword" type="password" autocomplete="new-password" minlength="10" maxlength="256" required>
+            </label>
+          </div>
+          <div class="education-form-grid" id="institutionCreateFields">
+            <label>
+              대학·기관명
+              <input id="institutionName" type="text" maxlength="120" placeholder="Neural Blocks University">
+            </label>
+            <label>
+              워크스페이스 ID
+              <input id="institutionSlug" type="text" maxlength="40" pattern="[a-z0-9][a-z0-9-]{2,38}[a-z0-9]" placeholder="neural-blocks-university">
+            </label>
+          </div>
+          <div id="institutionJoinFields" hidden>
+            <label>
+              대학 가입 코드
+              <input id="institutionJoinCode" type="text" maxlength="32" autocomplete="off" placeholder="관리자에게 받은 코드">
+            </label>
+          </div>
+          <button class="primary" type="submit">계정 생성</button>
+        </form>
+      </div>
+
+      <div class="education-status" id="authStatus">
+        새 대학을 개설한 첫 계정은 관리자 권한을 받습니다.
+      </div>
+    </div>
+  </dialog>
 
   <dialog class="education-dialog" id="educationDialog">
     <div class="education-dialog-shell">
@@ -34,26 +115,28 @@
       </header>
 
       <div class="education-toolbar">
-        <label>
-          역할
-          <select id="educationRole">
-            <option value="professor">교수</option>
-            <option value="student">학생</option>
-          </select>
-        </label>
-        <label>
-          사용자 이름
-          <input id="educationActorName" type="text" value="김교수" maxlength="40">
-        </label>
+        <div class="education-identity">
+          <span>로그인 사용자</span>
+          <strong id="educationUserBadge">-</strong>
+          <small id="educationTenantBadge">-</small>
+        </div>
         <label>
           현재 강좌
           <select id="educationCourseSelect"></select>
         </label>
-        <span class="badge" id="educationStorageBadge">브라우저 데모 저장</span>
+        <div class="education-code" id="educationTenantCodePanel">
+          <span>대학 가입 코드</span>
+          <code id="educationTenantJoinCode">-</code>
+        </div>
+        <div class="education-code" id="educationCourseCodePanel">
+          <span>강좌 가입 코드</span>
+          <code id="educationCourseJoinCode">-</code>
+        </div>
+        <button id="educationLogoutButton" type="button">로그아웃</button>
       </div>
 
       <div class="education-status" id="educationStatus">
-        실제 인증 전 단계입니다. 이 브라우저의 localStorage에만 저장됩니다.
+        인증된 서버 데이터를 불러오는 중입니다.
       </div>
 
       <section class="education-professor-tools" id="educationProfessorTools">
@@ -121,6 +204,17 @@
       </section>
 
       <section class="education-student-tools" id="educationStudentTools" hidden>
+        <form class="education-form education-join-course" id="courseJoinForm">
+          <div class="education-section-title">
+            <h3>강좌 가입</h3>
+            <span>Course code</span>
+          </div>
+          <label>
+            강좌 가입 코드
+            <input id="courseJoinCode" type="text" maxlength="32" autocomplete="off" placeholder="교수에게 받은 코드" required>
+          </label>
+          <button type="submit">강좌 가입</button>
+        </form>
         <div class="education-form">
           <div class="education-section-title">
             <h3>현재 실험 저장·제출</h3>
@@ -169,13 +263,7 @@
       </div>
 
       <footer class="education-dialog-footer">
-        <button id="exportEducationDataButton" type="button">수업 데이터 JSON 내보내기</button>
-        <button id="resetEducationDataButton" type="button">교육 데모 초기화</button>
-        <label class="file-button">
-          JSON 가져오기
-          <input id="importEducationDataInput" type="file" accept="application/json,.json">
-        </label>
-        <span>프로덕션에서는 대학 SSO·LTI·서버 DB로 교체됩니다.</span>
+        <span>SQLite tenant 격리 · HttpOnly 세션 · CSRF 보호 · 역할 기반 접근 제어</span>
       </footer>
     </div>
   </dialog>
@@ -571,7 +659,6 @@
     </article>
   </template>
 
-  <script src="./node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
-  <script type="module" src="./app.js?v=20260715-6"></script>
+  <script type="module" src="./app.js?v=20260715-8"></script>
 </body>
 </html>
