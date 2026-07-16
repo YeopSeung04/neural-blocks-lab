@@ -3,13 +3,17 @@ import hmac
 import json
 import re
 import secrets
-import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+
+from database import Database, DatabaseIntegrityError
+from mailer import Mailer
 
 
 SESSION_DAYS = 7
+EMAIL_VERIFICATION_HOURS = 24
+PASSWORD_RESET_MINUTES = 60
+INVITATION_DAYS = 7
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{2,38}[a-z0-9]$")
 MODEL_FAMILIES = {"any", "mlp", "cnn", "rnn", "gan"}
@@ -95,23 +99,29 @@ def row_dict(row):
 
 
 class NeuralBlocksBackend:
-    def __init__(self, database_path):
-        self.database_path = str(Path(database_path))
-        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        database_target,
+        mailer=None,
+        base_url="http://127.0.0.1:8770",
+        expose_dev_tokens=True,
+    ):
+        self.database = Database(database_target)
+        self.database_path = self.database.target
+        self.mailer = mailer or Mailer()
+        self.base_url = base_url.rstrip("/")
+        self.expose_dev_tokens = expose_dev_tokens
         self.initialize()
 
     def connect(self):
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+        return self.database.connect()
 
     def initialize(self):
+        previous_user_columns = self.database.column_names("users")
+        blob_type = "BYTEA" if self.database.engine == "postgres" else "BLOB"
         with self.connect() as db:
             db.executescript(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS tenants (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -126,8 +136,11 @@ class NeuralBlocksBackend:
                     email TEXT NOT NULL UNIQUE,
                     display_name TEXT NOT NULL,
                     role TEXT NOT NULL CHECK(role IN ('admin', 'professor', 'student')),
-                    password_salt BLOB NOT NULL,
-                    password_hash BLOB NOT NULL,
+                    password_salt {blob_type} NOT NULL,
+                    password_hash {blob_type} NOT NULL,
+                    email_verified_at TEXT,
+                    auth_provider TEXT NOT NULL DEFAULT 'password',
+                    external_subject TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -209,13 +222,116 @@ class NeuralBlocksBackend:
                     graded_by TEXT REFERENCES users(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS invitations (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    email TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('professor', 'student')),
+                    course_id TEXT REFERENCES courses(id) ON DELETE CASCADE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_by TEXT NOT NULL REFERENCES users(id),
+                    expires_at TEXT NOT NULL,
+                    accepted_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS email_tokens (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    purpose TEXT NOT NULL CHECK(purpose IN ('verify_email', 'password_reset')),
+                    token_hash TEXT NOT NULL UNIQUE,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+                    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    event_type TEXT NOT NULL,
+                    entity_type TEXT,
+                    entity_id TEXT,
+                    metadata_json TEXT NOT NULL,
+                    ip_address TEXT,
+                    user_agent TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS identity_providers (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK(kind IN ('oidc', 'lti')),
+                    name TEXT NOT NULL,
+                    issuer TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    authorization_endpoint TEXT NOT NULL,
+                    token_endpoint TEXT,
+                    jwks_uri TEXT NOT NULL,
+                    client_secret_env TEXT,
+                    deployment_id TEXT,
+                    default_role TEXT NOT NULL CHECK(default_role IN ('professor', 'student')),
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_by TEXT NOT NULL REFERENCES users(id),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(tenant_id, issuer, client_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS federation_states (
+                    state_hash TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK(kind IN ('oidc', 'lti')),
+                    nonce TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS external_identities (
+                    provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
+                    subject TEXT NOT NULL,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(provider_id, subject)
+                );
+
+                CREATE TABLE IF NOT EXISTS lti_contexts (
+                    provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
+                    context_id TEXT NOT NULL,
+                    course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(provider_id, context_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_courses_tenant ON courses(tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_assignments_course ON assignments(tenant_id, course_id);
                 CREATE INDEX IF NOT EXISTS idx_projects_course ON projects(tenant_id, course_id);
                 CREATE INDEX IF NOT EXISTS idx_submissions_course ON submissions(tenant_id, course_id);
+                CREATE INDEX IF NOT EXISTS idx_invitations_tenant ON invitations(tenant_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_email_tokens_user ON email_tokens(user_id, purpose);
+                CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_events(tenant_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_identity_providers_tenant ON identity_providers(tenant_id);
                 """
             )
+        self.database.add_column_if_missing("users", "email_verified_at", "TEXT")
+        self.database.add_column_if_missing(
+            "users",
+            "auth_provider",
+            "TEXT NOT NULL DEFAULT 'password'",
+        )
+        self.database.add_column_if_missing("users", "external_subject", "TEXT")
+        if previous_user_columns and "email_verified_at" not in previous_user_columns:
+            with self.connect() as db:
+                db.execute(
+                    """
+                    UPDATE users
+                    SET email_verified_at = created_at
+                    WHERE email_verified_at IS NULL AND created_at IS NOT NULL
+                    """
+                )
 
     def create_session(self, db, user_id):
         token = secrets.token_urlsafe(32)
@@ -231,7 +347,96 @@ class NeuralBlocksBackend:
         )
         return token, csrf
 
-    def register(self, payload):
+    def record_audit(
+        self,
+        db,
+        event_type,
+        tenant_id=None,
+        user_id=None,
+        entity_type=None,
+        entity_id=None,
+        metadata=None,
+        context=None,
+    ):
+        context = context or {}
+        db.execute(
+            """
+            INSERT INTO audit_events(
+                id, tenant_id, user_id, event_type, entity_type, entity_id,
+                metadata_json, ip_address, user_agent, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id("audit"),
+                tenant_id,
+                user_id,
+                event_type,
+                entity_type,
+                entity_id,
+                compact_json(metadata or {}),
+                str(context.get("ip") or "")[:80] or None,
+                str(context.get("userAgent") or "")[:500] or None,
+                iso_time(),
+            ),
+        )
+
+    def create_email_token(self, db, user_id, purpose, lifetime):
+        token = secrets.token_urlsafe(32)
+        now = utc_now()
+        db.execute(
+            """
+            UPDATE email_tokens
+            SET used_at = ?
+            WHERE user_id = ? AND purpose = ? AND used_at IS NULL
+            """,
+            (iso_time(now), user_id, purpose),
+        )
+        db.execute(
+            """
+            INSERT INTO email_tokens(
+                id, user_id, purpose, token_hash, expires_at, used_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+            """,
+            (
+                new_id("email_token"),
+                user_id,
+                purpose,
+                session_hash(token),
+                iso_time(now + lifetime),
+                iso_time(now),
+            ),
+        )
+        return token
+
+    def send_verification_email(self, email, display_name, token):
+        link = f"{self.base_url}/?verify_email={token}"
+        return self.mailer.send(
+            email,
+            "Neural Blocks Lab 이메일 인증",
+            (
+                f"{display_name}님, 아래 링크에서 이메일 인증을 완료하세요.\n\n"
+                f"{link}\n\n"
+                f"인증 토큰: {token}\n"
+                f"이 링크는 {EMAIL_VERIFICATION_HOURS}시간 동안 유효합니다."
+            ),
+            {"kind": "verify_email", "token": token, "link": link},
+        )
+
+    def send_password_reset_email(self, email, display_name, token):
+        link = f"{self.base_url}/?password_reset={token}"
+        return self.mailer.send(
+            email,
+            "Neural Blocks Lab 비밀번호 재설정",
+            (
+                f"{display_name}님, 아래 링크에서 비밀번호를 재설정하세요.\n\n"
+                f"{link}\n\n"
+                f"재설정 토큰: {token}\n"
+                f"이 링크는 {PASSWORD_RESET_MINUTES}분 동안 유효합니다."
+            ),
+            {"kind": "password_reset", "token": token, "link": link},
+        )
+
+    def register(self, payload, request_context=None):
         email = normalize_email(payload.get("email"))
         display_name = required_text(payload.get("displayName"), "Display name", 80)
         password_salt, password_hash = password_digest(payload.get("password"))
@@ -292,8 +497,9 @@ class NeuralBlocksBackend:
                     """
                     INSERT INTO users(
                         id, tenant_id, email, display_name, role,
-                        password_salt, password_hash, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        password_salt, password_hash, email_verified_at,
+                        auth_provider, external_subject, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'password', NULL, ?)
                     """,
                     (
                         user_id,
@@ -306,21 +512,43 @@ class NeuralBlocksBackend:
                         created_at,
                     ),
                 )
+                verification_token = self.create_email_token(
+                    db,
+                    user_id,
+                    "verify_email",
+                    timedelta(hours=EMAIL_VERIFICATION_HOURS),
+                )
                 token, csrf = self.create_session(db, user_id)
+                self.record_audit(
+                    db,
+                    "user.registered",
+                    tenant["id"],
+                    user_id,
+                    "user",
+                    user_id,
+                    {"role": role, "email": email},
+                    request_context,
+                )
                 db.commit()
-            except sqlite3.IntegrityError as error:
+            except DatabaseIntegrityError as error:
                 db.rollback()
-                if "users.email" in str(error):
+                error_text = str(error).lower()
+                if "users.email" in error_text or "email" in error_text:
                     raise ApiError(409, "Email is already registered", "conflict")
-                if "tenants.slug" in str(error):
+                if "tenants.slug" in error_text or "slug" in error_text:
                     raise ApiError(409, "Institution slug is already used", "conflict")
                 raise ApiError(409, "Registration data already exists", "conflict")
+        delivery = self.send_verification_email(email, display_name, verification_token)
         auth = self.authenticate(token)
         auth["csrfToken"] = csrf
         auth["sessionToken"] = token
+        auth["verificationRequired"] = True
+        auth["mailDelivery"] = delivery["mode"]
+        if self.expose_dev_tokens:
+            auth["devVerificationToken"] = verification_token
         return auth
 
-    def login(self, payload):
+    def login(self, payload, request_context=None):
         email = normalize_email(payload.get("email"))
         password = str(payload.get("password") or "")
         if len(password) < 10 or len(password) > 256:
@@ -336,6 +564,16 @@ class NeuralBlocksBackend:
             if not hmac.compare_digest(digest, row["password_hash"]):
                 raise ApiError(401, "Email or password is incorrect", "invalid_credentials")
             token, csrf = self.create_session(db, row["id"])
+            self.record_audit(
+                db,
+                "user.login",
+                row["tenant_id"],
+                row["id"],
+                "session",
+                None,
+                {"provider": "password"},
+                request_context,
+            )
         auth = self.authenticate(token)
         auth["csrfToken"] = csrf
         auth["sessionToken"] = token
@@ -350,6 +588,7 @@ class NeuralBlocksBackend:
                 SELECT
                     s.csrf_token, s.expires_at,
                     u.id AS user_id, u.email, u.display_name, u.role, u.tenant_id,
+                    u.email_verified_at, u.auth_provider,
                     t.name AS tenant_name, t.slug AS tenant_slug, t.join_code AS tenant_join_code
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
@@ -374,6 +613,8 @@ class NeuralBlocksBackend:
                     "displayName": row["display_name"],
                     "role": row["role"],
                     "tenantId": row["tenant_id"],
+                    "emailVerified": bool(row["email_verified_at"]),
+                    "authProvider": row["auth_provider"],
                 },
                 "tenant": {
                     "id": row["tenant_id"],
@@ -395,6 +636,144 @@ class NeuralBlocksBackend:
     def require_role(self, auth, *roles):
         if auth["user"]["role"] not in roles:
             raise ApiError(403, "This action is not allowed for your role", "forbidden")
+
+    def require_verified(self, auth):
+        if not auth["user"].get("emailVerified"):
+            raise ApiError(
+                403,
+                "Email verification is required before changing classroom data",
+                "email_not_verified",
+            )
+
+    def verify_email(self, payload, request_context=None):
+        token = required_text(payload.get("token"), "Verification token", 200)
+        now = utc_now()
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT et.*, u.tenant_id, u.email
+                FROM email_tokens et
+                JOIN users u ON u.id = et.user_id
+                WHERE et.token_hash = ? AND et.purpose = 'verify_email'
+                """,
+                (session_hash(token),),
+            ).fetchone()
+            if not row or row["used_at"]:
+                raise ApiError(400, "Verification token is invalid", "invalid_token")
+            expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+            if expires_at <= now:
+                raise ApiError(400, "Verification token has expired", "expired_token")
+            db.execute(
+                "UPDATE users SET email_verified_at = ? WHERE id = ?",
+                (iso_time(now), row["user_id"]),
+            )
+            db.execute(
+                "UPDATE email_tokens SET used_at = ? WHERE id = ?",
+                (iso_time(now), row["id"]),
+            )
+            self.record_audit(
+                db,
+                "user.email_verified",
+                row["tenant_id"],
+                row["user_id"],
+                "user",
+                row["user_id"],
+                {"email": row["email"]},
+                request_context,
+            )
+        return {"status": "verified"}
+
+    def resend_verification(self, payload):
+        email = str(payload.get("email") or "").strip().lower()
+        response = {"status": "accepted"}
+        if not EMAIL_PATTERN.match(email):
+            return response
+        with self.connect() as db:
+            user = db.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email,),
+            ).fetchone()
+            if not user or user["email_verified_at"]:
+                return response
+            token = self.create_email_token(
+                db,
+                user["id"],
+                "verify_email",
+                timedelta(hours=EMAIL_VERIFICATION_HOURS),
+            )
+        delivery = self.send_verification_email(email, user["display_name"], token)
+        response["mailDelivery"] = delivery["mode"]
+        if self.expose_dev_tokens:
+            response["devVerificationToken"] = token
+        return response
+
+    def request_password_reset(self, payload):
+        email = str(payload.get("email") or "").strip().lower()
+        response = {"status": "accepted"}
+        if not EMAIL_PATTERN.match(email):
+            return response
+        with self.connect() as db:
+            user = db.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email,),
+            ).fetchone()
+            if not user:
+                return response
+            token = self.create_email_token(
+                db,
+                user["id"],
+                "password_reset",
+                timedelta(minutes=PASSWORD_RESET_MINUTES),
+            )
+        delivery = self.send_password_reset_email(email, user["display_name"], token)
+        response["mailDelivery"] = delivery["mode"]
+        if self.expose_dev_tokens:
+            response["devPasswordResetToken"] = token
+        return response
+
+    def confirm_password_reset(self, payload, request_context=None):
+        token = required_text(payload.get("token"), "Password reset token", 200)
+        password_salt, password_hash = password_digest(payload.get("password"))
+        now = utc_now()
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT et.*, u.tenant_id
+                FROM email_tokens et
+                JOIN users u ON u.id = et.user_id
+                WHERE et.token_hash = ? AND et.purpose = 'password_reset'
+                """,
+                (session_hash(token),),
+            ).fetchone()
+            if not row or row["used_at"]:
+                raise ApiError(400, "Password reset token is invalid", "invalid_token")
+            expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+            if expires_at <= now:
+                raise ApiError(400, "Password reset token has expired", "expired_token")
+            db.execute(
+                """
+                UPDATE users
+                SET password_salt = ?, password_hash = ?, email_verified_at = ?
+                WHERE id = ?
+                """,
+                (password_salt, password_hash, iso_time(now), row["user_id"]),
+            )
+            db.execute(
+                "UPDATE email_tokens SET used_at = ? WHERE id = ?",
+                (iso_time(now), row["id"]),
+            )
+            db.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
+            self.record_audit(
+                db,
+                "user.password_reset",
+                row["tenant_id"],
+                row["user_id"],
+                "user",
+                row["user_id"],
+                {},
+                request_context,
+            )
+        return {"status": "password_reset"}
 
     def course_access(self, db, auth, course_id, instructor=False):
         row = db.execute(
@@ -439,6 +818,7 @@ class NeuralBlocksBackend:
 
     def create_course(self, auth, payload):
         self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
         created_at = iso_time()
         course = {
             "id": new_id("course"),
@@ -470,14 +850,25 @@ class NeuralBlocksBackend:
                     """,
                     (course["id"], auth["user"]["id"], created_at),
                 )
+                self.record_audit(
+                    db,
+                    "course.created",
+                    auth["user"]["tenantId"],
+                    auth["user"]["id"],
+                    "course",
+                    course["id"],
+                    {"code": course["code"], "term": course["term"]},
+                    auth.get("_request"),
+                )
                 db.commit()
-            except sqlite3.IntegrityError:
+            except DatabaseIntegrityError:
                 db.rollback()
                 raise ApiError(409, "Course code and term already exist", "conflict")
         return self.course_payload(course)
 
     def join_course(self, auth, payload):
         self.require_role(auth, "student")
+        self.require_verified(auth)
         code = required_text(payload.get("joinCode"), "Course join code", 32).upper()
         with self.connect() as db:
             course = db.execute(
@@ -488,10 +879,21 @@ class NeuralBlocksBackend:
                 raise ApiError(404, "Course join code was not found", "not_found")
             db.execute(
                 """
-                INSERT OR IGNORE INTO enrollments(course_id, user_id, role, created_at)
+                INSERT INTO enrollments(course_id, user_id, role, created_at)
                 VALUES (?, ?, 'student', ?)
+                ON CONFLICT(course_id, user_id) DO NOTHING
                 """,
                 (course["id"], auth["user"]["id"], iso_time()),
+            )
+            self.record_audit(
+                db,
+                "course.joined",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "course",
+                course["id"],
+                {"role": "student"},
+                auth.get("_request"),
             )
             return self.course_payload(course, include_join_code=False)
 
@@ -508,6 +910,728 @@ class NeuralBlocksBackend:
             "createdAt": data["created_at"],
         }
 
+    def send_invitation_email(self, email, role, tenant_name, token):
+        link = f"{self.base_url}/?invitation={token}"
+        role_label = "교수" if role == "professor" else "학생"
+        return self.mailer.send(
+            email,
+            f"{tenant_name} Neural Blocks Lab 초대",
+            (
+                f"{tenant_name}에서 {role_label} 계정으로 초대했습니다.\n\n"
+                f"{link}\n\n"
+                f"초대 토큰: {token}\n"
+                f"이 초대는 {INVITATION_DAYS}일 동안 유효합니다."
+            ),
+            {"kind": "invitation", "token": token, "link": link, "role": role},
+        )
+
+    def create_invitation(self, auth, payload):
+        self.require_role(auth, "admin")
+        self.require_verified(auth)
+        email = normalize_email(payload.get("email"))
+        role = str(payload.get("role") or "professor")
+        if role not in ("professor", "student"):
+            raise ApiError(400, "Invitation role is invalid", "validation_error")
+        course_id = str(payload.get("courseId") or "").strip() or None
+        token = secrets.token_urlsafe(32)
+        now = utc_now()
+        invitation = {
+            "id": new_id("invitation"),
+            "tenant_id": auth["user"]["tenantId"],
+            "email": email,
+            "role": role,
+            "course_id": course_id,
+            "token_hash": session_hash(token),
+            "created_by": auth["user"]["id"],
+            "expires_at": iso_time(now + timedelta(days=INVITATION_DAYS)),
+            "created_at": iso_time(now),
+        }
+        with self.connect() as db:
+            if course_id:
+                self.course_access(db, auth, course_id, instructor=True)
+            existing_user = db.execute(
+                "SELECT id FROM users WHERE email = ?",
+                (email,),
+            ).fetchone()
+            if existing_user:
+                raise ApiError(409, "Email is already registered", "conflict")
+            db.execute(
+                """
+                UPDATE invitations
+                SET accepted_at = ?
+                WHERE tenant_id = ? AND email = ? AND accepted_at IS NULL
+                """,
+                (iso_time(now), auth["user"]["tenantId"], email),
+            )
+            db.execute(
+                """
+                INSERT INTO invitations(
+                    id, tenant_id, email, role, course_id, token_hash,
+                    created_by, expires_at, accepted_at, created_at
+                ) VALUES (
+                    :id, :tenant_id, :email, :role, :course_id, :token_hash,
+                    :created_by, :expires_at, NULL, :created_at
+                )
+                """,
+                invitation,
+            )
+            self.record_audit(
+                db,
+                "invitation.created",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "invitation",
+                invitation["id"],
+                {"email": email, "role": role, "courseId": course_id},
+                auth.get("_request"),
+            )
+        delivery = self.send_invitation_email(
+            email,
+            role,
+            auth["tenant"]["name"],
+            token,
+        )
+        result = {
+            "id": invitation["id"],
+            "email": email,
+            "role": role,
+            "courseId": course_id,
+            "expiresAt": invitation["expires_at"],
+            "acceptedAt": None,
+            "mailDelivery": delivery["mode"],
+        }
+        if self.expose_dev_tokens:
+            result["devInvitationToken"] = token
+        return result
+
+    def list_invitations(self, auth):
+        self.require_role(auth, "admin")
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT i.*, c.name AS course_name, u.display_name AS created_by_name
+                FROM invitations i
+                LEFT JOIN courses c ON c.id = i.course_id
+                JOIN users u ON u.id = i.created_by
+                WHERE i.tenant_id = ?
+                ORDER BY i.created_at DESC
+                LIMIT 100
+                """,
+                (auth["user"]["tenantId"],),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "email": row["email"],
+                    "role": row["role"],
+                    "courseId": row["course_id"],
+                    "courseName": row["course_name"],
+                    "createdByName": row["created_by_name"],
+                    "expiresAt": row["expires_at"],
+                    "acceptedAt": row["accepted_at"],
+                    "createdAt": row["created_at"],
+                }
+                for row in rows
+            ]
+
+    def accept_invitation(self, payload, request_context=None):
+        token = required_text(payload.get("token"), "Invitation token", 200)
+        display_name = required_text(payload.get("displayName"), "Display name", 80)
+        password_salt, password_hash = password_digest(payload.get("password"))
+        now = utc_now()
+        with self.connect() as db:
+            invitation = db.execute(
+                """
+                SELECT i.*, t.name AS tenant_name, t.slug AS tenant_slug
+                FROM invitations i
+                JOIN tenants t ON t.id = i.tenant_id
+                WHERE i.token_hash = ?
+                """,
+                (session_hash(token),),
+            ).fetchone()
+            if not invitation or invitation["accepted_at"]:
+                raise ApiError(400, "Invitation token is invalid", "invalid_token")
+            expires_at = datetime.fromisoformat(
+                invitation["expires_at"].replace("Z", "+00:00")
+            )
+            if expires_at <= now:
+                raise ApiError(400, "Invitation token has expired", "expired_token")
+            user_id = new_id("user")
+            try:
+                db.execute(
+                    """
+                    INSERT INTO users(
+                        id, tenant_id, email, display_name, role,
+                        password_salt, password_hash, email_verified_at,
+                        auth_provider, external_subject, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'password', NULL, ?)
+                    """,
+                    (
+                        user_id,
+                        invitation["tenant_id"],
+                        invitation["email"],
+                        display_name,
+                        invitation["role"],
+                        password_salt,
+                        password_hash,
+                        iso_time(now),
+                        iso_time(now),
+                    ),
+                )
+            except DatabaseIntegrityError:
+                raise ApiError(409, "Email is already registered", "conflict")
+            if invitation["course_id"]:
+                enrollment_role = (
+                    "instructor" if invitation["role"] == "professor" else "student"
+                )
+                db.execute(
+                    """
+                    INSERT INTO enrollments(course_id, user_id, role, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(course_id, user_id) DO NOTHING
+                    """,
+                    (
+                        invitation["course_id"],
+                        user_id,
+                        enrollment_role,
+                        iso_time(now),
+                    ),
+                )
+            db.execute(
+                "UPDATE invitations SET accepted_at = ? WHERE id = ?",
+                (iso_time(now), invitation["id"]),
+            )
+            session_token, csrf = self.create_session(db, user_id)
+            self.record_audit(
+                db,
+                "invitation.accepted",
+                invitation["tenant_id"],
+                user_id,
+                "invitation",
+                invitation["id"],
+                {"role": invitation["role"], "courseId": invitation["course_id"]},
+                request_context,
+            )
+        auth = self.authenticate(session_token)
+        auth["csrfToken"] = csrf
+        auth["sessionToken"] = session_token
+        return auth
+
+    def list_course_members(self, auth, course_id):
+        self.require_role(auth, "admin", "professor")
+        with self.connect() as db:
+            self.course_access(db, auth, course_id, instructor=True)
+            rows = db.execute(
+                """
+                SELECT
+                    u.id, u.email, u.display_name, u.role AS tenant_role,
+                    u.email_verified_at, u.auth_provider,
+                    e.role AS course_role, e.created_at AS enrolled_at,
+                    COUNT(s.id) AS submission_count,
+                    MAX(s.submitted_at) AS last_submission_at
+                FROM enrollments e
+                JOIN users u ON u.id = e.user_id
+                LEFT JOIN submissions s
+                    ON s.course_id = e.course_id AND s.student_id = u.id
+                WHERE e.course_id = ? AND u.tenant_id = ?
+                GROUP BY
+                    u.id, u.email, u.display_name, u.role,
+                    u.email_verified_at, u.auth_provider,
+                    e.role, e.created_at
+                ORDER BY e.role, u.display_name
+                """,
+                (course_id, auth["user"]["tenantId"]),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "email": row["email"],
+                    "displayName": row["display_name"],
+                    "tenantRole": row["tenant_role"],
+                    "courseRole": row["course_role"],
+                    "emailVerified": bool(row["email_verified_at"]),
+                    "authProvider": row["auth_provider"],
+                    "enrolledAt": row["enrolled_at"],
+                    "submissionCount": int(row["submission_count"] or 0),
+                    "lastSubmissionAt": row["last_submission_at"],
+                }
+                for row in rows
+            ]
+
+    def remove_course_member(self, auth, course_id, user_id):
+        self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
+        with self.connect() as db:
+            self.course_access(db, auth, course_id, instructor=True)
+            enrollment = db.execute(
+                """
+                SELECT e.role, u.display_name
+                FROM enrollments e
+                JOIN users u ON u.id = e.user_id
+                WHERE e.course_id = ? AND e.user_id = ? AND u.tenant_id = ?
+                """,
+                (course_id, user_id, auth["user"]["tenantId"]),
+            ).fetchone()
+            if not enrollment:
+                raise ApiError(404, "Course member was not found", "not_found")
+            if enrollment["role"] != "student":
+                raise ApiError(400, "Instructor enrollment cannot be removed here", "validation_error")
+            db.execute(
+                "DELETE FROM enrollments WHERE course_id = ? AND user_id = ?",
+                (course_id, user_id),
+            )
+            self.record_audit(
+                db,
+                "course.member_removed",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "course",
+                course_id,
+                {"removedUserId": user_id, "displayName": enrollment["display_name"]},
+                auth.get("_request"),
+            )
+        return {"status": "removed"}
+
+    def list_audit_events(self, auth, limit=100):
+        self.require_role(auth, "admin")
+        try:
+            limit = max(1, min(200, int(limit)))
+        except (TypeError, ValueError):
+            limit = 100
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT a.*, u.display_name AS user_name
+                FROM audit_events a
+                LEFT JOIN users u ON u.id = a.user_id
+                WHERE a.tenant_id = ?
+                ORDER BY a.created_at DESC
+                LIMIT ?
+                """,
+                (auth["user"]["tenantId"], limit),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "eventType": row["event_type"],
+                    "userId": row["user_id"],
+                    "userName": row["user_name"],
+                    "entityType": row["entity_type"],
+                    "entityId": row["entity_id"],
+                    "metadata": parse_json(row["metadata_json"], {}),
+                    "ipAddress": row["ip_address"],
+                    "createdAt": row["created_at"],
+                }
+                for row in rows
+            ]
+
+    def create_identity_provider(self, auth, payload):
+        self.require_role(auth, "admin")
+        self.require_verified(auth)
+        kind = str(payload.get("kind") or "oidc").lower()
+        if kind not in ("oidc", "lti"):
+            raise ApiError(400, "Provider kind must be oidc or lti", "validation_error")
+        default_role = str(payload.get("defaultRole") or "student").lower()
+        if default_role not in ("professor", "student"):
+            raise ApiError(400, "Default role is invalid", "validation_error")
+        client_secret_env = str(payload.get("clientSecretEnv") or "").strip() or None
+        if client_secret_env and not re.fullmatch(r"[A-Z][A-Z0-9_]{2,80}", client_secret_env):
+            raise ApiError(
+                400,
+                "Client secret environment variable name is invalid",
+                "validation_error",
+            )
+        provider = {
+            "id": new_id("provider"),
+            "tenant_id": auth["user"]["tenantId"],
+            "kind": kind,
+            "name": required_text(payload.get("name"), "Provider name", 100),
+            "issuer": required_text(payload.get("issuer"), "Issuer", 500).rstrip("/"),
+            "client_id": required_text(payload.get("clientId"), "Client ID", 300),
+            "authorization_endpoint": required_text(
+                payload.get("authorizationEndpoint"),
+                "Authorization endpoint",
+                1000,
+            ),
+            "token_endpoint": str(payload.get("tokenEndpoint") or "").strip() or None,
+            "jwks_uri": required_text(payload.get("jwksUri"), "JWKS URI", 1000),
+            "client_secret_env": client_secret_env,
+            "deployment_id": str(payload.get("deploymentId") or "").strip() or None,
+            "default_role": default_role,
+            "enabled": 1 if payload.get("enabled", True) else 0,
+            "created_by": auth["user"]["id"],
+            "created_at": iso_time(),
+        }
+        if kind == "oidc" and not provider["token_endpoint"]:
+            raise ApiError(400, "OIDC token endpoint is required", "validation_error")
+        if kind == "lti" and not provider["deployment_id"]:
+            raise ApiError(400, "LTI deployment ID is required", "validation_error")
+        with self.connect() as db:
+            try:
+                db.execute(
+                    """
+                    INSERT INTO identity_providers(
+                        id, tenant_id, kind, name, issuer, client_id,
+                        authorization_endpoint, token_endpoint, jwks_uri,
+                        client_secret_env, deployment_id, default_role,
+                        enabled, created_by, created_at
+                    ) VALUES (
+                        :id, :tenant_id, :kind, :name, :issuer, :client_id,
+                        :authorization_endpoint, :token_endpoint, :jwks_uri,
+                        :client_secret_env, :deployment_id, :default_role,
+                        :enabled, :created_by, :created_at
+                    )
+                    """,
+                    provider,
+                )
+            except DatabaseIntegrityError:
+                raise ApiError(409, "Identity provider is already configured", "conflict")
+            self.record_audit(
+                db,
+                "identity_provider.created",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "identity_provider",
+                provider["id"],
+                {"kind": kind, "issuer": provider["issuer"]},
+                auth.get("_request"),
+            )
+        return self.identity_provider_payload(provider, include_private=True)
+
+    def identity_provider_payload(self, row, include_private=False):
+        data = row_dict(row)
+        payload = {
+            "id": data["id"],
+            "kind": data["kind"],
+            "name": data["name"],
+            "issuer": data["issuer"],
+            "clientId": data["client_id"],
+            "authorizationEndpoint": data["authorization_endpoint"],
+            "tokenEndpoint": data["token_endpoint"],
+            "jwksUri": data["jwks_uri"],
+            "deploymentId": data["deployment_id"],
+            "defaultRole": data["default_role"],
+            "enabled": bool(data["enabled"]),
+            "createdAt": data["created_at"],
+        }
+        if include_private:
+            payload["clientSecretEnv"] = data["client_secret_env"]
+        return payload
+
+    def list_identity_providers(self, auth):
+        self.require_role(auth, "admin")
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM identity_providers
+                WHERE tenant_id = ?
+                ORDER BY created_at DESC
+                """,
+                (auth["user"]["tenantId"],),
+            ).fetchall()
+            return [
+                self.identity_provider_payload(row, include_private=True)
+                for row in rows
+            ]
+
+    def public_identity_providers(self, tenant_slug):
+        tenant_slug = required_text(tenant_slug, "Tenant slug", 40).lower()
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT p.*
+                FROM identity_providers p
+                JOIN tenants t ON t.id = p.tenant_id
+                WHERE t.slug = ? AND p.enabled = 1
+                ORDER BY p.name
+                """,
+                (tenant_slug,),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "name": row["name"],
+                    "tenantSlug": tenant_slug,
+                }
+                for row in rows
+            ]
+
+    def get_identity_provider(
+        self,
+        provider_id=None,
+        tenant_slug=None,
+        issuer=None,
+        client_id=None,
+        kind=None,
+    ):
+        filters = ["p.enabled = 1"]
+        parameters = []
+        if provider_id:
+            filters.append("p.id = ?")
+            parameters.append(provider_id)
+        if tenant_slug:
+            filters.append("t.slug = ?")
+            parameters.append(tenant_slug)
+        if issuer:
+            filters.append("p.issuer = ?")
+            parameters.append(str(issuer).rstrip("/"))
+        if client_id:
+            filters.append("p.client_id = ?")
+            parameters.append(client_id)
+        if kind:
+            filters.append("p.kind = ?")
+            parameters.append(kind)
+        with self.connect() as db:
+            row = db.execute(
+                f"""
+                SELECT p.*, t.slug AS tenant_slug, t.name AS tenant_name
+                FROM identity_providers p
+                JOIN tenants t ON t.id = p.tenant_id
+                WHERE {" AND ".join(filters)}
+                LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+            if not row:
+                raise ApiError(404, "Identity provider was not found", "not_found")
+            return row_dict(row)
+
+    def create_federation_state(
+        self,
+        provider,
+        kind,
+        target_path="/",
+        context=None,
+    ):
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(24)
+        now = utc_now()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO federation_states(
+                    state_hash, tenant_id, provider_id, kind, nonce,
+                    target_path, context_json, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_hash(state),
+                    provider["tenant_id"],
+                    provider["id"],
+                    kind,
+                    nonce,
+                    str(target_path or "/")[:1000],
+                    compact_json(context or {}),
+                    iso_time(now + timedelta(minutes=10)),
+                    iso_time(now),
+                ),
+            )
+        return {"state": state, "nonce": nonce}
+
+    def consume_federation_state(self, state, kind):
+        state = required_text(state, "Federation state", 300)
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT * FROM federation_states
+                WHERE state_hash = ?
+                """,
+                (session_hash(state),),
+            ).fetchone()
+            if not row or row["kind"] != kind:
+                raise ApiError(400, "Federation state is invalid", "invalid_state")
+            expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+            if expires_at <= utc_now():
+                db.execute(
+                    "DELETE FROM federation_states WHERE state_hash = ?",
+                    (session_hash(state),),
+                )
+                raise ApiError(400, "Federation state has expired", "expired_state")
+            db.execute(
+                "DELETE FROM federation_states WHERE state_hash = ?",
+                (session_hash(state),),
+            )
+            result = {
+                "nonce": row["nonce"],
+                "targetPath": row["target_path"],
+                "context": parse_json(row["context_json"], {}),
+                "providerId": row["provider_id"],
+                "tenantId": row["tenant_id"],
+            }
+        result["provider"] = self.get_identity_provider(provider_id=result["providerId"])
+        return result
+
+    def resolve_federated_login(self, provider, claims, request_context=None):
+        subject = required_text(claims.get("sub"), "Identity subject", 500)
+        now = iso_time()
+        with self.connect() as db:
+            identity = db.execute(
+                """
+                SELECT u.*
+                FROM external_identities e
+                JOIN users u ON u.id = e.user_id
+                WHERE e.provider_id = ? AND e.subject = ?
+                """,
+                (provider["id"], subject),
+            ).fetchone()
+            if identity:
+                user_id = identity["id"]
+                role = identity["role"]
+            else:
+                role = provider["default_role"]
+                lti_roles = claims.get(
+                    "https://purl.imsglobal.org/spec/lti/claim/roles",
+                    [],
+                )
+                if any("Instructor" in str(item) for item in lti_roles):
+                    role = "professor"
+                email = str(claims.get("email") or "").strip().lower()
+                if not EMAIL_PATTERN.match(email):
+                    digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:18]
+                    email = f"federated-{digest}@{provider['tenant_slug']}.invalid"
+                display_name = str(
+                    claims.get("name")
+                    or claims.get("preferred_username")
+                    or email.split("@", 1)[0]
+                )[:80]
+                existing = db.execute(
+                    "SELECT * FROM users WHERE email = ?",
+                    (email,),
+                ).fetchone()
+                if existing and existing["tenant_id"] != provider["tenant_id"]:
+                    raise ApiError(
+                        409,
+                        "Federated email belongs to another tenant",
+                        "conflict",
+                    )
+                if existing:
+                    user_id = existing["id"]
+                    role = existing["role"]
+                else:
+                    user_id = new_id("user")
+                    password_salt, password_hash = password_digest(
+                        secrets.token_urlsafe(48)
+                    )
+                    db.execute(
+                        """
+                        INSERT INTO users(
+                            id, tenant_id, email, display_name, role,
+                            password_salt, password_hash, email_verified_at,
+                            auth_provider, external_subject, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            provider["tenant_id"],
+                            email,
+                            display_name,
+                            role,
+                            password_salt,
+                            password_hash,
+                            now,
+                            provider["kind"],
+                            subject,
+                            now,
+                        ),
+                    )
+                db.execute(
+                    """
+                    INSERT INTO external_identities(
+                        provider_id, subject, user_id, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(provider_id, subject) DO NOTHING
+                    """,
+                    (provider["id"], subject, user_id, now),
+                )
+
+            course_id = None
+            if provider["kind"] == "lti":
+                context_claim = claims.get(
+                    "https://purl.imsglobal.org/spec/lti/claim/context",
+                    {},
+                )
+                context_id = str(context_claim.get("id") or "").strip()
+                if context_id:
+                    mapping = db.execute(
+                        """
+                        SELECT course_id FROM lti_contexts
+                        WHERE provider_id = ? AND context_id = ?
+                        """,
+                        (provider["id"], context_id),
+                    ).fetchone()
+                    if mapping:
+                        course_id = mapping["course_id"]
+                    else:
+                        owner = db.execute(
+                            """
+                            SELECT id FROM users
+                            WHERE tenant_id = ? AND role = 'admin'
+                            ORDER BY created_at LIMIT 1
+                            """,
+                            (provider["tenant_id"],),
+                        ).fetchone()
+                        course_id = new_id("course")
+                        course_code = (
+                            "LTI-" + hashlib.sha256(context_id.encode("utf-8"))
+                            .hexdigest()[:8]
+                        ).upper()
+                        db.execute(
+                            """
+                            INSERT INTO courses(
+                                id, tenant_id, owner_id, name, code,
+                                term, join_code, created_at
+                            ) VALUES (?, ?, ?, ?, ?, 'LTI', ?, ?)
+                            """,
+                            (
+                                course_id,
+                                provider["tenant_id"],
+                                owner["id"] if owner else user_id,
+                                str(
+                                    context_claim.get("title")
+                                    or context_claim.get("label")
+                                    or "LTI Course"
+                                )[:120],
+                                course_code,
+                                join_code(10),
+                                now,
+                            ),
+                        )
+                        db.execute(
+                            """
+                            INSERT INTO lti_contexts(
+                                provider_id, context_id, course_id, created_at
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (provider["id"], context_id, course_id, now),
+                        )
+                    enrollment_role = "instructor" if role in ("admin", "professor") else "student"
+                    db.execute(
+                        """
+                        INSERT INTO enrollments(course_id, user_id, role, created_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(course_id, user_id) DO UPDATE SET role = excluded.role
+                        """,
+                        (course_id, user_id, enrollment_role, now),
+                    )
+
+            session_token, csrf = self.create_session(db, user_id)
+            self.record_audit(
+                db,
+                "user.federated_login",
+                provider["tenant_id"],
+                user_id,
+                "identity_provider",
+                provider["id"],
+                {"kind": provider["kind"], "courseId": course_id},
+                request_context,
+            )
+        auth = self.authenticate(session_token)
+        auth["csrfToken"] = csrf
+        auth["sessionToken"] = session_token
+        auth["courseId"] = course_id
+        return auth
+
     def list_assignments(self, auth, course_id):
         with self.connect() as db:
             self.course_access(db, auth, course_id)
@@ -523,6 +1647,7 @@ class NeuralBlocksBackend:
 
     def create_assignment(self, auth, course_id, payload):
         self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
         with self.connect() as db:
             self.course_access(db, auth, course_id, instructor=True)
             required_family = str(payload.get("requiredFamily") or "any")
@@ -574,6 +1699,16 @@ class NeuralBlocksBackend:
                 )
                 """,
                 assignment,
+            )
+            self.record_audit(
+                db,
+                "assignment.created",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "assignment",
+                assignment["id"],
+                {"courseId": course_id, "requiredFamily": required_family},
+                auth.get("_request"),
             )
             return self.assignment_payload(assignment)
 
@@ -629,6 +1764,7 @@ class NeuralBlocksBackend:
             return [self.project_payload(row) for row in rows]
 
     def save_project(self, auth, course_id, payload):
+        self.require_verified(auth)
         with self.connect() as db:
             self.course_access(db, auth, course_id)
             project_id = payload.get("projectId")
@@ -685,6 +1821,16 @@ class NeuralBlocksBackend:
                     compact_json(snapshot),
                     now,
                 ),
+            )
+            self.record_audit(
+                db,
+                "project.version_saved",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "project",
+                project_id,
+                {"courseId": course_id, "versionId": version_id},
+                auth.get("_request"),
             )
             db.commit()
             row = db.execute(
@@ -781,6 +1927,7 @@ class NeuralBlocksBackend:
 
     def submit_assignment(self, auth, assignment_id, payload):
         self.require_role(auth, "student")
+        self.require_verified(auth)
         with self.connect() as db:
             assignment = db.execute(
                 """
@@ -850,6 +1997,16 @@ class NeuralBlocksBackend:
                 """,
                 submission,
             )
+            self.record_audit(
+                db,
+                "submission.created",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "submission",
+                submission["id"],
+                {"assignmentId": assignment_id, "attempt": attempt},
+                auth.get("_request"),
+            )
             row = db.execute(
                 """
                 SELECT s.*, u.display_name AS student_name
@@ -887,6 +2044,7 @@ class NeuralBlocksBackend:
 
     def grade_submission(self, auth, submission_id, payload):
         self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
         try:
             score = float(payload.get("score"))
         except (TypeError, ValueError):
@@ -920,6 +2078,16 @@ class NeuralBlocksBackend:
                     submission_id,
                     auth["user"]["tenantId"],
                 ),
+            )
+            self.record_audit(
+                db,
+                "submission.graded",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "submission",
+                submission_id,
+                {"score": round(score, 1)},
+                auth.get("_request"),
             )
             row = db.execute(
                 """

@@ -12,14 +12,26 @@ import time
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from backend import ApiError, NeuralBlocksBackend
+from federation import (
+    FederationError,
+    exchange_oidc_code,
+    lti_authorization_url,
+    oidc_authorization_url,
+    validate_lti_claims,
+    verify_id_token,
+)
+from mailer import Mailer
 
 ROOT = Path(__file__).resolve().parent
-DATABASE_PATH = Path(
-    os.environ.get("NBL_DATABASE_PATH", ROOT / ".data" / "neural_blocks.db")
+DATABASE_TARGET = os.environ.get(
+    "NBL_DATABASE_URL",
+    os.environ.get("NBL_DATABASE_PATH", ROOT / ".data" / "neural_blocks.db"),
 )
+BASE_URL = os.environ.get("NBL_BASE_URL", "http://127.0.0.1:8770").rstrip("/")
+EXPOSE_DEV_TOKENS = os.environ.get("NBL_EXPOSE_DEV_TOKENS", "1") == "1"
 AUTH_WINDOW_SECONDS = 15 * 60
 AUTH_MAX_ATTEMPTS = 12
 AUTH_ATTEMPTS = {}
@@ -244,7 +256,12 @@ def collect_metrics():
     }
 
 
-BACKEND = NeuralBlocksBackend(DATABASE_PATH)
+BACKEND = NeuralBlocksBackend(
+    DATABASE_TARGET,
+    mailer=Mailer(ROOT / ".data" / "mail-outbox.jsonl"),
+    base_url=BASE_URL,
+    expose_dev_tokens=EXPOSE_DEV_TOKENS,
+)
 
 
 def allow_auth_attempt(key):
@@ -333,6 +350,30 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
             raise ApiError(400, "JSON request body must be an object", "invalid_json")
         return payload
 
+    def read_form(self):
+        content_type = self.headers.get("Content-Type", "")
+        if "application/x-www-form-urlencoded" not in content_type:
+            raise ApiError(
+                415,
+                "Content-Type must be application/x-www-form-urlencoded",
+                "unsupported_media_type",
+            )
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ApiError(400, "Invalid Content-Length", "invalid_request")
+        if length <= 0 or length > self.max_json_bytes:
+            raise ApiError(400, "Form request body is invalid", "invalid_request")
+        try:
+            values = parse_qs(
+                self.rfile.read(length).decode("utf-8"),
+                keep_blank_values=True,
+                max_num_fields=50,
+            )
+        except (UnicodeDecodeError, ValueError):
+            raise ApiError(400, "Form request body is invalid", "invalid_request")
+        return {key: items[-1] for key, items in values.items()}
+
     def session_token(self):
         cookie = SimpleCookie()
         try:
@@ -343,7 +384,22 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
         return value.value if value else None
 
     def require_auth(self):
-        return self.backend.authenticate(self.session_token())
+        auth = self.backend.authenticate(self.session_token())
+        auth["_request"] = self.request_context()
+        return auth
+
+    def request_context(self):
+        return {
+            "ip": self.client_address[0],
+            "userAgent": self.headers.get("User-Agent", ""),
+        }
+
+    def public_auth(self, auth):
+        return {
+            key: value
+            for key, value in auth.items()
+            if not str(key).startswith("_")
+        }
 
     def require_csrf(self, auth):
         provided = self.headers.get("X-CSRF-Token", "")
@@ -373,19 +429,139 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
             {"error": {"code": error.code, "message": error.message}},
         )
 
+    def send_redirect(self, location, headers=None, status=302):
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        for key, value in headers or []:
+            self.send_header(key, value)
+        self.end_headers()
+
+    def safe_return_path(self, value):
+        value = str(value or "/").strip()
+        parsed = urlparse(value)
+        if parsed.scheme or parsed.netloc:
+            base = urlparse(BASE_URL)
+            if parsed.scheme != base.scheme or parsed.netloc != base.netloc:
+                return "/"
+            value = parsed.path or "/"
+            if parsed.query:
+                value += f"?{parsed.query}"
+        if not value.startswith("/") or value.startswith("//"):
+            return "/"
+        return value[:1000]
+
+    def handle_federation_error(self, error):
+        self.send_json(
+            error.status,
+            {"error": {"code": error.code, "message": error.message}},
+        )
+
     def do_GET(self):
         path = self.api_path()
+        query = parse_qs(urlparse(self.path).query)
         if path == "/api/system-metrics":
             self.send_json(200, collect_metrics())
             return
         if path == "/api/health":
-            self.send_json(200, {"status": "ok", "database": "sqlite"})
+            self.send_json(
+                200,
+                {"status": "ok", "database": self.backend.database.description},
+            )
+            return
+        if path == "/api/auth/providers":
+            try:
+                tenant_slug = (query.get("tenant") or [""])[-1]
+                self.send_json(
+                    200,
+                    {"providers": self.backend.public_identity_providers(tenant_slug)},
+                )
+            except ApiError as error:
+                self.handle_api_error(error)
+            return
+        if path == "/api/auth/oidc/start":
+            try:
+                tenant_slug = (query.get("tenant") or [""])[-1]
+                provider_id = (query.get("provider") or [""])[-1]
+                return_to = self.safe_return_path((query.get("returnTo") or ["/"])[-1])
+                provider = self.backend.get_identity_provider(
+                    provider_id=provider_id,
+                    tenant_slug=tenant_slug,
+                    kind="oidc",
+                )
+                state = self.backend.create_federation_state(
+                    provider,
+                    "oidc",
+                    return_to,
+                )
+                redirect_uri = f"{BASE_URL}/api/auth/oidc/callback"
+                self.send_redirect(
+                    oidc_authorization_url(
+                        provider,
+                        state["state"],
+                        state["nonce"],
+                        redirect_uri,
+                    )
+                )
+            except ApiError as error:
+                self.handle_api_error(error)
+            except FederationError as error:
+                self.handle_federation_error(error)
+            return
+        if path == "/api/auth/oidc/callback":
+            try:
+                code = (query.get("code") or [""])[-1]
+                state_value = (query.get("state") or [""])[-1]
+                if not code:
+                    raise ApiError(400, "OIDC authorization code is missing", "invalid_request")
+                state = self.backend.consume_federation_state(state_value, "oidc")
+                provider = state["provider"]
+                redirect_uri = f"{BASE_URL}/api/auth/oidc/callback"
+                token_response = exchange_oidc_code(provider, code, redirect_uri)
+                claims = verify_id_token(
+                    provider,
+                    token_response["id_token"],
+                    state["nonce"],
+                )
+                auth = self.backend.resolve_federated_login(
+                    provider,
+                    claims,
+                    self.request_context(),
+                )
+                session_token = auth.pop("sessionToken")
+                self.send_redirect(
+                    self.safe_return_path(state["targetPath"]),
+                    [("Set-Cookie", self.session_cookie(session_token))],
+                )
+            except ApiError as error:
+                self.handle_api_error(error)
+            except FederationError as error:
+                self.handle_federation_error(error)
             return
         if path.startswith("/api/"):
             try:
                 auth = self.require_auth()
                 if path == "/api/auth/me":
-                    self.send_json(200, auth)
+                    self.send_json(200, self.public_auth(auth))
+                    return
+                if path == "/api/admin/invitations":
+                    self.send_json(
+                        200,
+                        {"invitations": self.backend.list_invitations(auth)},
+                    )
+                    return
+                if path == "/api/admin/audit":
+                    limit = (query.get("limit") or ["100"])[-1]
+                    self.send_json(
+                        200,
+                        {"events": self.backend.list_audit_events(auth, limit)},
+                    )
+                    return
+                if path == "/api/admin/identity-providers":
+                    self.send_json(
+                        200,
+                        {"providers": self.backend.list_identity_providers(auth)},
+                    )
                     return
                 if path == "/api/courses":
                     self.send_json(200, {"courses": self.backend.list_courses(auth)})
@@ -409,6 +585,13 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
                     self.send_json(
                         200,
                         {"submissions": self.backend.list_submissions(auth, match.group(1))},
+                    )
+                    return
+                match = re.fullmatch(r"/api/courses/([^/]+)/members", path)
+                if match:
+                    self.send_json(
+                        200,
+                        {"members": self.backend.list_course_members(auth, match.group(1))},
                     )
                     return
                 match = re.fullmatch(r"/api/projects/([^/]+)", path)
@@ -440,18 +623,140 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
             self.send_error(405, "Method Not Allowed")
             return
         try:
+            if path in ("/api/auth/lti/login", "/api/auth/lti/launch"):
+                form = self.read_form()
+                if path.endswith("/login"):
+                    issuer = str(form.get("iss") or "").rstrip("/")
+                    client_id = form.get("client_id")
+                    provider = self.backend.get_identity_provider(
+                        issuer=issuer,
+                        client_id=client_id,
+                        kind="lti",
+                    )
+                    deployment_id = form.get("lti_deployment_id")
+                    if deployment_id and deployment_id != provider["deployment_id"]:
+                        raise ApiError(
+                            400,
+                            "LTI deployment ID is invalid",
+                            "invalid_lti_deployment",
+                        )
+                    login_hint = str(form.get("login_hint") or "")
+                    if not login_hint:
+                        raise ApiError(400, "LTI login_hint is required", "invalid_request")
+                    target_path = self.safe_return_path(
+                        form.get("target_link_uri") or "/"
+                    )
+                    state = self.backend.create_federation_state(
+                        provider,
+                        "lti",
+                        target_path,
+                        {
+                            "ltiMessageHint": form.get("lti_message_hint"),
+                            "deploymentId": deployment_id,
+                        },
+                    )
+                    self.send_redirect(
+                        lti_authorization_url(
+                            provider,
+                            state["state"],
+                            state["nonce"],
+                            f"{BASE_URL}/api/auth/lti/launch",
+                            login_hint,
+                            form.get("lti_message_hint"),
+                        )
+                    )
+                    return
+
+                state = self.backend.consume_federation_state(
+                    form.get("state"),
+                    "lti",
+                )
+                provider = state["provider"]
+                claims = verify_id_token(
+                    provider,
+                    form.get("id_token"),
+                    state["nonce"],
+                )
+                validate_lti_claims(provider, claims)
+                auth = self.backend.resolve_federated_login(
+                    provider,
+                    claims,
+                    self.request_context(),
+                )
+                session_token = auth.pop("sessionToken")
+                destination = self.safe_return_path(state["targetPath"])
+                separator = "&" if "?" in destination else "?"
+                self.send_redirect(
+                    f"{destination}{separator}lti=launched",
+                    [("Set-Cookie", self.session_cookie(session_token))],
+                )
+                return
+
             payload = self.read_json()
-            if path in ("/api/auth/register", "/api/auth/login"):
+            public_auth_paths = {
+                "/api/auth/register",
+                "/api/auth/login",
+                "/api/auth/invitations/accept",
+                "/api/auth/verify-email",
+                "/api/auth/resend-verification",
+                "/api/auth/password-reset/request",
+                "/api/auth/password-reset/confirm",
+            }
+            if path in public_auth_paths:
                 key = self.auth_rate_key(payload)
                 if not allow_auth_attempt(key):
                     raise ApiError(429, "Too many authentication attempts", "rate_limited")
-                auth = self.backend.register(payload) if path.endswith("register") else self.backend.login(payload)
-                token = auth.pop("sessionToken")
-                self.send_json(
-                    201 if path.endswith("register") else 200,
-                    auth,
-                    [("Set-Cookie", self.session_cookie(token))],
-                )
+                if path == "/api/auth/register":
+                    auth = self.backend.register(payload, self.request_context())
+                    token = auth.pop("sessionToken")
+                    self.send_json(
+                        201,
+                        auth,
+                        [("Set-Cookie", self.session_cookie(token))],
+                    )
+                    return
+                if path == "/api/auth/login":
+                    auth = self.backend.login(payload, self.request_context())
+                    token = auth.pop("sessionToken")
+                    self.send_json(
+                        200,
+                        auth,
+                        [("Set-Cookie", self.session_cookie(token))],
+                    )
+                    return
+                if path == "/api/auth/invitations/accept":
+                    auth = self.backend.accept_invitation(
+                        payload,
+                        self.request_context(),
+                    )
+                    token = auth.pop("sessionToken")
+                    self.send_json(
+                        201,
+                        auth,
+                        [("Set-Cookie", self.session_cookie(token))],
+                    )
+                    return
+                if path == "/api/auth/verify-email":
+                    self.send_json(
+                        200,
+                        self.backend.verify_email(payload, self.request_context()),
+                    )
+                    return
+                if path == "/api/auth/resend-verification":
+                    self.send_json(202, self.backend.resend_verification(payload))
+                    return
+                if path == "/api/auth/password-reset/request":
+                    self.send_json(202, self.backend.request_password_reset(payload))
+                    return
+                if path == "/api/auth/password-reset/confirm":
+                    self.send_json(
+                        200,
+                        self.backend.confirm_password_reset(
+                            payload,
+                            self.request_context(),
+                        ),
+                    )
+                    return
                 return
 
             auth = self.require_auth()
@@ -466,6 +771,18 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/courses":
                 self.send_json(201, {"course": self.backend.create_course(auth, payload)})
+                return
+            if path == "/api/admin/invitations":
+                self.send_json(
+                    201,
+                    {"invitation": self.backend.create_invitation(auth, payload)},
+                )
+                return
+            if path == "/api/admin/identity-providers":
+                self.send_json(
+                    201,
+                    {"provider": self.backend.create_identity_provider(auth, payload)},
+                )
                 return
             if path == "/api/courses/join":
                 self.send_json(200, {"course": self.backend.join_course(auth, payload)})
@@ -498,9 +815,25 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
                     {"submission": self.backend.grade_submission(auth, match.group(1), payload)},
                 )
                 return
+            match = re.fullmatch(
+                r"/api/courses/([^/]+)/members/([^/]+)/remove",
+                path,
+            )
+            if match:
+                self.send_json(
+                    200,
+                    self.backend.remove_course_member(
+                        auth,
+                        match.group(1),
+                        match.group(2),
+                    ),
+                )
+                return
             raise ApiError(404, "API endpoint was not found", "not_found")
         except ApiError as error:
             self.handle_api_error(error)
+        except FederationError as error:
+            self.handle_federation_error(error)
         except Exception as error:
             self.log_error("Unhandled API POST error: %s", error)
             self.send_json(500, {"error": {"code": "server_error", "message": "Internal server error"}})
@@ -517,7 +850,7 @@ def main():
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.bind, args.port), NeuralBlocksHandler)
     print(f"Neural Blocks Lab: http://{args.bind}:{args.port}")
-    print(f"Classroom database: {DATABASE_PATH}")
+    print(f"Classroom database: {BACKEND.database.description}")
     print("Authentication endpoints: /api/auth/register, /api/auth/login, /api/auth/me")
     print("System metrics endpoint: /api/system-metrics")
     try:

@@ -16,8 +16,15 @@ const queue = [
     tenant: { id: "tenant_1", name: "Test University" },
     csrfToken: "csrf-token",
   }),
+  response(200, { status: "verified" }),
   response(201, {
     course: { id: "course_1", code: "AI101", joinCode: "JOIN123" },
+  }),
+  response(200, {
+    members: [{ id: "user_1", displayName: "Admin", courseRole: "instructor" }],
+  }),
+  response(201, {
+    invitation: { id: "invite_1", email: "professor@example.edu" },
   }),
   response(403, {
     error: { code: "forbidden", message: "Denied" },
@@ -30,9 +37,18 @@ const api = new EducationApi(async (path, options) => {
 });
 
 await api.me();
+await api.verifyEmail("verification-token");
 await api.createCourse({ name: "AI", code: "AI101", term: "2026-2" });
-assert.equal(requests[1].options.headers["X-CSRF-Token"], "csrf-token");
-assert.equal(requests[1].options.credentials, "same-origin");
+await api.listCourseMembers("course_1");
+await api.createInvitation({
+  email: "professor@example.edu",
+  role: "professor",
+  courseId: "course_1",
+});
+assert.equal(requests[1].options.headers["X-CSRF-Token"], undefined);
+assert.equal(requests[2].options.headers["X-CSRF-Token"], "csrf-token");
+assert.equal(requests[4].options.headers["X-CSRF-Token"], "csrf-token");
+assert.equal(requests[2].options.credentials, "same-origin");
 
 await assert.rejects(
   () => api.joinCourse("WRONG"),

@@ -9,6 +9,8 @@
 ```bash
 cd ai-learning-platform
 npm install
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 npm run serve
 ```
 
@@ -17,6 +19,20 @@ npm run serve
 ```text
 http://127.0.0.1:8770
 ```
+
+전체 Python 의존성이 필요한 PostgreSQL·OIDC·LTI 검증 서버는 다음처럼 실행할 수 있습니다.
+
+```bash
+.venv/bin/python server.py --bind 127.0.0.1 --port 8770
+```
+
+### Docker + PostgreSQL
+
+```bash
+docker compose up --build
+```
+
+Compose는 PostgreSQL 16과 애플리케이션을 함께 실행합니다. 운영 환경에서는 `docker-compose.yml`의 개발용 비밀번호를 사용하지 말고 `.env.example`을 기준으로 Secret Manager나 배포 플랫폼의 비밀 환경변수를 연결해야 합니다.
 
 ## 현재 기능
 
@@ -64,6 +80,14 @@ http://127.0.0.1:8770
 - 모델 패밀리와 목표 accuracy 자동 조건 검사
 - 교수 점수·피드백 입력과 학생 제출 이력
 - SQLite 기반 강좌·과제·프로젝트·제출 영구 저장
+- PostgreSQL `DATABASE_URL` 전환
+- 교수·학생 이메일 초대와 강좌 자동 배정
+- 강좌 학생 명단, 제출 수, 이메일 인증·로그인 방식 확인
+- 이메일 인증, 인증 메일 재발송, 비밀번호 재설정
+- SMTP 발송과 로컬 JSONL 개발 메일함
+- tenant 감사 로그
+- 대학별 OIDC 공급자 설정과 Authorization Code callback
+- LTI 1.3 OIDC login initiation, signed launch, context-to-course 매핑
 
 ## 사용자 데이터
 
@@ -140,7 +164,61 @@ dataset/
 
 비밀번호는 PBKDF2-HMAC-SHA256으로 해시하고 세션 원문은 데이터베이스에 저장하지 않습니다. 브라우저 세션은 JavaScript가 읽을 수 없는 HttpOnly 쿠키를 사용하며, 데이터 변경 API는 별도 CSRF 토큰을 확인합니다.
 
-현재 구현은 단일 서버 MVP입니다. 실제 대학 서비스 배포 전에는 HTTPS와 `NBL_SECURE_COOKIES=1`, 이메일 인증·비밀번호 재설정, 관리자용 교수 초대, 감사 로그, PostgreSQL 마이그레이션, SSO/OIDC·LTI 1.3 연동이 추가로 필요합니다.
+신규 비밀번호 계정은 이메일 인증 전까지 강좌 데이터 변경이 차단됩니다. SMTP 환경변수가 없으면 `.data/mail-outbox.jsonl`에 메일이 기록됩니다. 로컬 개발에서는 응답과 UI에 검증 토큰이 표시되지만 운영에서는 반드시 `NBL_EXPOSE_DEV_TOKENS=0`으로 설정해야 합니다.
+
+### PostgreSQL
+
+`NBL_DATABASE_URL`이 있으면 PostgreSQL을 사용하고, 없으면 `NBL_DATABASE_PATH` 또는 `.data/neural_blocks.db` SQLite를 사용합니다.
+
+```bash
+export NBL_DATABASE_URL='postgresql://user:password@host:5432/neural_blocks'
+export NBL_BASE_URL='https://ai-lab.example.edu'
+export NBL_SECURE_COOKIES=1
+export NBL_EXPOSE_DEV_TOKENS=0
+```
+
+### 이메일
+
+```bash
+export NBL_SMTP_HOST='smtp.example.edu'
+export NBL_SMTP_PORT=587
+export NBL_SMTP_USER='neural-blocks'
+export NBL_SMTP_PASSWORD='secret'
+export NBL_SMTP_FROM='no-reply@example.edu'
+export NBL_SMTP_TLS=1
+```
+
+### OIDC
+
+관리자 화면에서 issuer, client ID, authorization endpoint, token endpoint, JWKS URI와 client secret 환경변수 이름을 등록합니다. Client secret 값 자체는 DB에 저장하지 않습니다.
+
+```text
+Callback URL: https://서비스주소/api/auth/oidc/callback
+Login start:  https://서비스주소/api/auth/oidc/start
+```
+
+OIDC ID Token은 공급자의 JWKS로 서명, issuer, audience, 만료, nonce를 검증합니다.
+
+### LTI 1.3
+
+LMS 플랫폼에는 다음 Tool URL을 등록합니다.
+
+```text
+OIDC login initiation: https://서비스주소/api/auth/lti/login
+Launch redirect URI:   https://서비스주소/api/auth/lti/launch
+```
+
+LTI launch는 서명된 ID Token, nonce, deployment ID, LTI version과 message type을 확인하고 LTI context를 내부 강좌에 매핑합니다. 현재 범위는 Resource Link·Deep Linking launch 기반이며 NRPS 학생 명단 동기화와 AGS 성적 역전송은 다음 단계입니다.
+
+참조 규격:
+
+- [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
+- [1EdTech LTI 1.3 Core](https://www.imsglobal.org/spec/lti/v1p3/)
+- [1EdTech Security Framework](https://www.imsglobal.org/spec/security/v1p0/)
+
+### 운영 전 추가 보강
+
+현재 HTTP 서버는 파일럿과 단일 인스턴스 검증용입니다. 대학 서비스 운영 전에는 HTTPS reverse proxy, 관리형 PostgreSQL 백업·복구, 메일 전송 큐, 감사 로그 보존 정책, Secret Manager, provider 수정·폐기, 관리자 MFA, NRPS·AGS 연동, 부하 테스트가 필요합니다.
 
 사용자가 업로드한 CSV와 이미지 원본은 실험 Snapshot에 포함하지 않습니다. Snapshot에는 모델 구조, 학습 설정, 데이터 요약과 지표만 저장되며 원본 데이터는 복원 시 다시 선택해야 합니다.
 
@@ -237,6 +315,16 @@ npm run test:all
 `backend_test.py`는 계정 생성과 로그인, 두 대학 tenant 격리, 학생의 대학·강좌 가입, 프로젝트 버전, 제출 자동 검사와 채점을 검증합니다.
 
 `server_api_test.py`는 실제 HTTP 서버에서 HttpOnly·SameSite 세션 쿠키, CSRF 차단, 인증 세션 종료를 검증합니다.
+
+`federation_test.py`는 OIDC/LTI authorization URL, LTI claim, RSA 서명 ID Token과 nonce 검증을 확인합니다. PyJWT crypto 의존성이 없으면 서명 검증 테스트만 건너뜁니다.
+
+`postgres_test.py`는 `NBL_TEST_POSTGRES_URL`이 있을 때 PostgreSQL 스키마, 이메일 인증, 강좌, 교수 초대와 명단을 실제 DB에서 검증합니다.
+
+```bash
+NBL_TEST_POSTGRES_URL='postgresql://postgres:password@127.0.0.1:5432/testdb' \
+NBL_TEST_POSTGRES_RESET=1 \
+.venv/bin/python postgres_test.py
+```
 
 `catalog-test.mjs`는 다음을 검증합니다.
 

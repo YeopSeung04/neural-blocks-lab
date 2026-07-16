@@ -8,11 +8,13 @@
     "test:education": "node education-api-test.mjs",
     "test:backend": "python3 backend_test.py",
     "test:api": "python3 server_api_test.py",
+    "test:federation": "python3 federation_test.py",
+    "test:postgres": "python3 postgres_test.py",
     "test:catalog": "node catalog-test.mjs",
     "test:tf-training": "node tf-training-test.mjs",
     "test:system": "python3 server_test.py",
-    "test:all": "npm test && npm run test:data && npm run test:education && npm run test:backend && npm run test:api && npm run test:catalog && npm run test:tf-training && npm run test:system",
-    "serve": "python3 server.py --bind 127.0.0.1 --port 8770"
+    "test:all": "npm test && npm run test:data && npm run test:education && npm run test:backend && npm run test:api && npm run test:federation && npm run test:postgres && npm run test:catalog && npm run test:tf-training && npm run test:system",
+    "serve": "python3 run_server.py --bind 127.0.0.1 --port 8770"
   },
   "dependencies": {
     "@tensorflow/tfjs": "4.22.0",

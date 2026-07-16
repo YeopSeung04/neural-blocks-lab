@@ -85,6 +85,60 @@ export class EducationApi {
     });
   }
 
+  async verifyEmail(token) {
+    return this.request("/api/auth/verify-email", {
+      method: "POST",
+      body: { token },
+      csrf: false,
+    });
+  }
+
+  async resendVerification(email) {
+    return this.request("/api/auth/resend-verification", {
+      method: "POST",
+      body: { email },
+      csrf: false,
+    });
+  }
+
+  async requestPasswordReset(email) {
+    return this.request("/api/auth/password-reset/request", {
+      method: "POST",
+      body: { email },
+      csrf: false,
+    });
+  }
+
+  async confirmPasswordReset(token, password) {
+    return this.request("/api/auth/password-reset/confirm", {
+      method: "POST",
+      body: { token, password },
+      csrf: false,
+    });
+  }
+
+  async acceptInvitation(payload) {
+    return this.request("/api/auth/invitations/accept", {
+      method: "POST",
+      body: payload,
+      csrf: false,
+    });
+  }
+
+  async listPublicProviders(tenantSlug) {
+    const query = new URLSearchParams({ tenant: tenantSlug });
+    return (await this.request(`/api/auth/providers?${query}`)).providers;
+  }
+
+  oidcStartUrl(tenantSlug, providerId, returnTo = "/") {
+    const query = new URLSearchParams({
+      tenant: tenantSlug,
+      provider: providerId,
+      returnTo,
+    });
+    return `/api/auth/oidc/start?${query}`;
+  }
+
   async logout() {
     const result = await this.request("/api/auth/logout", {
       method: "POST",
@@ -103,6 +157,45 @@ export class EducationApi {
       method: "POST",
       body: payload,
     })).course;
+  }
+
+  async listCourseMembers(courseId) {
+    return (await this.request(`/api/courses/${encodeURIComponent(courseId)}/members`))
+      .members;
+  }
+
+  async removeCourseMember(courseId, userId) {
+    return this.request(
+      `/api/courses/${encodeURIComponent(courseId)}/members/${encodeURIComponent(userId)}/remove`,
+      { method: "POST", body: {} },
+    );
+  }
+
+  async listInvitations() {
+    return (await this.request("/api/admin/invitations")).invitations;
+  }
+
+  async createInvitation(payload) {
+    return (await this.request("/api/admin/invitations", {
+      method: "POST",
+      body: payload,
+    })).invitation;
+  }
+
+  async listAuditEvents(limit = 100) {
+    return (await this.request(`/api/admin/audit?limit=${encodeURIComponent(limit)}`))
+      .events;
+  }
+
+  async listIdentityProviders() {
+    return (await this.request("/api/admin/identity-providers")).providers;
+  }
+
+  async createIdentityProvider(payload) {
+    return (await this.request("/api/admin/identity-providers", {
+      method: "POST",
+      body: payload,
+    })).provider;
   }
 
   async joinCourse(joinCode) {

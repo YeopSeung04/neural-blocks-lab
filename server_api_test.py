@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from backend import NeuralBlocksBackend
+from mailer import MemoryMailer
 from server import AUTH_ATTEMPTS, AUTH_ATTEMPTS_LOCK, NeuralBlocksHandler, ThreadingHTTPServer
 
 
@@ -14,7 +15,10 @@ class ServerApiTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         database_path = Path(self.temporary_directory.name) / "api-test.db"
         self.previous_backend = NeuralBlocksHandler.backend
-        NeuralBlocksHandler.backend = NeuralBlocksBackend(database_path)
+        NeuralBlocksHandler.backend = NeuralBlocksBackend(
+            database_path,
+            mailer=MemoryMailer(),
+        )
         with AUTH_ATTEMPTS_LOCK:
             AUTH_ATTEMPTS.clear()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), NeuralBlocksHandler)
@@ -84,6 +88,23 @@ class ServerApiTest(unittest.TestCase):
             "Cookie": cookie,
             "X-CSRF-Token": registration["csrfToken"],
         }
+        status, unverified, _ = self.request(
+            "POST",
+            "/api/courses",
+            {"name": "AI 101", "code": "AI101", "term": "2026-2"},
+            auth_headers,
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(unverified["error"]["code"], "email_not_verified")
+
+        status, verified, _ = self.request(
+            "POST",
+            "/api/auth/verify-email",
+            {"token": registration["devVerificationToken"]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(verified["status"], "verified")
+
         status, created, _ = self.request(
             "POST",
             "/api/courses",
@@ -100,6 +121,47 @@ class ServerApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(current_user["tenant"]["slug"], "api-test-university")
+        self.assertTrue(current_user["user"]["emailVerified"])
+
+        status, invitation, _ = self.request(
+            "POST",
+            "/api/admin/invitations",
+            {
+                "email": "professor-invite@api.test",
+                "role": "professor",
+                "courseId": created["course"]["id"],
+            },
+            auth_headers,
+        )
+        self.assertEqual(status, 201)
+        status, accepted, accepted_headers = self.request(
+            "POST",
+            "/api/auth/invitations/accept",
+            {
+                "token": invitation["invitation"]["devInvitationToken"],
+                "displayName": "Professor Invite",
+                "password": "ProfessorInvitePassword",
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(accepted["user"]["role"], "professor")
+        self.assertIn("HttpOnly", accepted_headers["Set-Cookie"])
+
+        status, roster, _ = self.request(
+            "GET",
+            f"/api/courses/{created['course']['id']}/members",
+            headers={"Cookie": cookie},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(roster["members"]), 2)
+
+        status, audit, _ = self.request(
+            "GET",
+            "/api/admin/audit?limit=20",
+            headers={"Cookie": cookie},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(audit["events"])
 
         status, logged_out, logout_headers = self.request(
             "POST",

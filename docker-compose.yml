@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: neural_blocks
+      POSTGRES_USER: neural_blocks
+      POSTGRES_PASSWORD: local-development-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neural_blocks -d neural_blocks"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - neural-blocks-postgres:/var/lib/postgresql/data
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NBL_BASE_URL: http://127.0.0.1:8770
+      NBL_DATABASE_URL: postgresql://neural_blocks:local-development-only@db:5432/neural_blocks
+      NBL_SECURE_COOKIES: "0"
+      NBL_EXPOSE_DEV_TOKENS: "1"
+    ports:
+      - "8770:8080"
+
+volumes:
+  neural-blocks-postgres:

@@ -54,6 +54,7 @@ input[type="number"],
 input[type="text"],
 input[type="email"],
 input[type="password"],
+input[type="url"],
 input[type="datetime-local"],
 textarea {
   border: 1px solid var(--border);
@@ -100,6 +101,7 @@ input[type="number"],
 input[type="text"],
 input[type="email"],
 input[type="password"],
+input[type="url"],
 input[type="datetime-local"],
 textarea {
   width: 100%;
@@ -213,6 +215,16 @@ output {
   display: grid;
   grid-template-columns: 0.8fr 1.2fr;
   gap: 12px;
+}
+
+.auth-utility-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compact-form {
+  align-content: start;
 }
 
 .education-dialog-header,
@@ -330,6 +342,15 @@ output {
   gap: 10px;
 }
 
+.education-admin-tools {
+  grid-template-columns: minmax(240px, 0.7fr) minmax(0, 1.3fr);
+  gap: 10px;
+}
+
+.education-admin-tools:not([hidden]) {
+  display: grid;
+}
+
 .education-professor-tools:not([hidden]) {
   display: grid;
 }
@@ -348,6 +369,19 @@ output {
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
+}
+
+.integration-form summary {
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.integration-form form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .education-section-title h3 {
@@ -390,6 +424,27 @@ output {
   gap: 10px;
 }
 
+.education-operations-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.education-operations-board > section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.operations-list {
+  min-height: 140px;
+  max-height: 300px;
+}
+
 .education-list {
   display: grid;
   align-content: start;
@@ -428,6 +483,30 @@ output {
 
 .education-list-item.submission {
   border-left-color: var(--yellow);
+}
+
+.education-list-item.member {
+  border-left-color: var(--blue);
+}
+
+.education-list-item.invitation {
+  border-left-color: var(--green);
+}
+
+.education-list-item.provider {
+  border-left-color: var(--cyan);
+}
+
+.education-list-item.audit {
+  border-left-color: var(--border-strong);
+}
+
+.education-list-item code {
+  overflow-wrap: anywhere;
+  color: var(--cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  line-height: 1.5;
 }
 
 .education-list-item strong {
@@ -1406,9 +1485,12 @@ canvas {
 
   .education-toolbar,
   .auth-grid,
+  .auth-utility-grid,
   .education-professor-tools,
+  .education-admin-tools,
   .education-student-tools,
-  .education-board {
+  .education-board,
+  .education-operations-board {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -1480,9 +1562,12 @@ canvas {
 
   .education-toolbar,
   .auth-grid,
+  .auth-utility-grid,
   .education-professor-tools,
+  .education-admin-tools,
   .education-student-tools,
   .education-board,
+  .education-operations-board,
   .education-form-grid,
   .education-item-actions,
   .education-grade-grid {
