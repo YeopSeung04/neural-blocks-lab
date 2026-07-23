@@ -88,6 +88,10 @@ Compose는 PostgreSQL 16과 애플리케이션을 함께 실행합니다. 운영
 - tenant 감사 로그
 - 대학별 OIDC 공급자 설정과 Authorization Code callback
 - LTI 1.3 OIDC login initiation, signed launch, context-to-course 매핑
+- LTI NRPS 학생·교수 명단 페이지네이션 동기화
+- LTI AGS LineItem 자동 생성과 교수 채점 결과 역전송
+- LTI service token의 Client Secret Basic·Private Key JWT 인증
+- OIDC/LTI 공급자 편집·활성화·비활성화
 
 ## 사용자 데이터
 
@@ -208,17 +212,30 @@ OIDC login initiation: https://서비스주소/api/auth/lti/login
 Launch redirect URI:   https://서비스주소/api/auth/lti/launch
 ```
 
-LTI launch는 서명된 ID Token, nonce, deployment ID, LTI version과 message type을 확인하고 LTI context를 내부 강좌에 매핑합니다. 현재 범위는 Resource Link·Deep Linking launch 기반이며 NRPS 학생 명단 동기화와 AGS 성적 역전송은 다음 단계입니다.
+LTI launch는 서명된 ID Token, nonce, deployment ID, LTI version과 message type을 확인하고 LTI context를 내부 강좌에 매핑합니다. Launch의 NRPS·AGS service claim은 강좌 연결 정보에 저장됩니다.
+
+- 교수 화면의 `LMS 명단 동기화`는 NRPS Membership Container의 모든 페이지를 읽어 교수·학생 계정과 강좌 배정을 갱신합니다.
+- 비활성 또는 명단에서 사라진 LMS 사용자는 해당 강좌 배정에서 제외됩니다.
+- 채점이 완료된 제출은 `LMS로 성적 전송`으로 AGS LineItem을 생성하거나 기존 LineItem을 재사용한 뒤 `/scores`로 전달합니다.
+- 서비스 토큰은 `client_secret_basic`과 `private_key_jwt`를 지원합니다. 운영 LMS에서는 플랫폼 등록 방식에 맞는 인증 방식을 선택해야 합니다.
+
+Private Key JWT 예시:
+
+```bash
+export NBL_LTI_PRIVATE_KEY="$(cat /run/secrets/lti-private-key.pem)"
+```
 
 참조 규격:
 
 - [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
 - [1EdTech LTI 1.3 Core](https://www.imsglobal.org/spec/lti/v1p3/)
+- [1EdTech Names and Role Provisioning Services 2.0](https://www.imsglobal.org/spec/lti-nrps/v2p0/)
+- [1EdTech Assignment and Grade Services 2.0](https://www.imsglobal.org/spec/lti-ags/v2p0/)
 - [1EdTech Security Framework](https://www.imsglobal.org/spec/security/v1p0/)
 
 ### 운영 전 추가 보강
 
-현재 HTTP 서버는 파일럿과 단일 인스턴스 검증용입니다. 대학 서비스 운영 전에는 HTTPS reverse proxy, 관리형 PostgreSQL 백업·복구, 메일 전송 큐, 감사 로그 보존 정책, Secret Manager, provider 수정·폐기, 관리자 MFA, NRPS·AGS 연동, 부하 테스트가 필요합니다.
+현재 HTTP 서버는 파일럿과 단일 인스턴스 검증용입니다. 대학 서비스 운영 전에는 HTTPS reverse proxy, 관리형 PostgreSQL 백업·복구, 메일 전송 큐, 감사 로그 보존 정책, Secret Manager, 관리자 MFA, LMS별 인증 상호운용 테스트, 재시도 작업 큐, 부하 테스트가 필요합니다.
 
 사용자가 업로드한 CSV와 이미지 원본은 실험 Snapshot에 포함하지 않습니다. Snapshot에는 모델 구조, 학습 설정, 데이터 요약과 지표만 저장되며 원본 데이터는 복원 시 다시 선택해야 합니다.
 
@@ -312,13 +329,13 @@ npm run test:all
 
 `education-api-test.mjs`는 API 클라이언트의 same-origin 요청과 CSRF 헤더, 서버 오류 변환을 검증합니다.
 
-`backend_test.py`는 계정 생성과 로그인, 두 대학 tenant 격리, 학생의 대학·강좌 가입, 프로젝트 버전, 제출 자동 검사와 채점을 검증합니다.
+`backend_test.py`는 계정 생성과 로그인, 두 대학 tenant 격리, 학생의 대학·강좌 가입, 프로젝트 버전, 제출 자동 검사, NRPS 명단 반영, AGS 성적 전송 계획과 공급자 업데이트를 검증합니다.
 
-`server_api_test.py`는 실제 HTTP 서버에서 HttpOnly·SameSite 세션 쿠키, CSRF 차단, 인증 세션 종료를 검증합니다.
+`server_api_test.py`는 실제 HTTP 서버에서 HttpOnly·SameSite 세션 쿠키, CSRF 차단, 공급자 수정, LTI 강좌 연결 조회, 모의 LMS를 사용한 NRPS 동기화·AGS 성적 전송과 인증 세션 종료를 검증합니다.
 
-`federation_test.py`는 OIDC/LTI authorization URL, LTI claim, RSA 서명 ID Token과 nonce 검증을 확인합니다. PyJWT crypto 의존성이 없으면 서명 검증 테스트만 건너뜁니다.
+`federation_test.py`는 OIDC/LTI authorization URL, LTI claim, RSA 서명 ID Token, nonce, Private Key JWT 토큰 인증, NRPS 페이지네이션, AGS LineItem·Score 요청을 확인합니다. PyJWT crypto 의존성이 없으면 서명 검증 테스트만 건너뜁니다.
 
-`postgres_test.py`는 `NBL_TEST_POSTGRES_URL`이 있을 때 PostgreSQL 스키마, 이메일 인증, 강좌, 교수 초대와 명단을 실제 DB에서 검증합니다.
+`postgres_test.py`는 `NBL_TEST_POSTGRES_URL`이 있을 때 PostgreSQL 스키마, 이메일 인증, 강좌, 교수 초대, 명단, LTI 공급자 설정을 실제 DB에서 검증합니다.
 
 ```bash
 NBL_TEST_POSTGRES_URL='postgresql://postgres:password@127.0.0.1:5432/testdb' \

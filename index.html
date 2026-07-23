@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Neural Blocks Lab</title>
-  <link rel="stylesheet" href="./styles.css?v=20260716-1">
+  <link rel="stylesheet" href="./styles.css?v=20260723-1">
 </head>
 <body>
   <header class="topbar">
@@ -320,6 +320,7 @@
         <details class="education-form integration-form">
           <summary>OIDC / LTI 1.3 공급자 등록</summary>
           <form id="identityProviderForm">
+            <input id="identityProviderId" type="hidden">
             <div class="education-form-grid">
               <label>
                 연동 방식
@@ -364,11 +365,33 @@
                 <input id="identityProviderSecretEnv" type="text" placeholder="NBL_UNIVERSITY_OIDC_SECRET">
               </label>
               <label>
+                LTI 서비스 토큰 인증
+                <select id="identityProviderTokenAuthMethod">
+                  <option value="client_secret_basic">Client secret basic</option>
+                  <option value="private_key_jwt">Private key JWT</option>
+                </select>
+              </label>
+              <label>
+                Private key 환경변수
+                <input id="identityProviderPrivateKeyEnv" type="text" placeholder="NBL_LTI_PRIVATE_KEY">
+              </label>
+              <label>
+                Private key ID
+                <input id="identityProviderPrivateKeyKid" type="text" placeholder="tool-key-2026">
+              </label>
+              <label>
                 LTI Deployment ID
                 <input id="identityProviderDeploymentId" type="text" placeholder="LTI에서 필수">
               </label>
             </div>
-            <button class="primary" type="submit">인증 공급자 저장</button>
+            <label class="inline-check">
+              <input id="identityProviderEnabled" type="checkbox" checked>
+              로그인 및 LMS 연동 활성화
+            </label>
+            <div class="education-action-row">
+              <button class="primary" id="identityProviderSubmitButton" type="submit">인증 공급자 저장</button>
+              <button id="identityProviderCancelButton" type="button" hidden>편집 취소</button>
+            </div>
           </form>
         </details>
       </section>
@@ -429,6 +452,13 @@
             <span id="providerCount">0</span>
           </div>
           <div class="education-list operations-list" id="educationProvidersList"></div>
+        </section>
+        <section id="educationLtiServicesPanel">
+          <div class="education-section-title">
+            <h3>LTI 강좌 연동</h3>
+            <span id="ltiServiceBadge">미연결</span>
+          </div>
+          <div class="education-list operations-list" id="educationLtiServices"></div>
         </section>
         <section class="education-admin-only" id="educationAuditPanel">
           <div class="education-section-title">
@@ -860,6 +890,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260716-1"></script>
+  <script type="module" src="./app.js?v=20260723-1"></script>
 </body>
 </html>

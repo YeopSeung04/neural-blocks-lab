@@ -105,6 +105,7 @@ export function mountEducationWorkspace({
     instructorOperations: document.getElementById("educationInstructorOperations"),
     invitationsPanel: document.getElementById("educationInvitationsPanel"),
     providersPanel: document.getElementById("educationProvidersPanel"),
+    ltiServicesPanel: document.getElementById("educationLtiServicesPanel"),
     auditPanel: document.getElementById("educationAuditPanel"),
     courseForm: document.getElementById("courseForm"),
     courseName: document.getElementById("courseName"),
@@ -117,6 +118,7 @@ export function mountEducationWorkspace({
     invitationRole: document.getElementById("invitationRole"),
     invitationAttachCourse: document.getElementById("invitationAttachCourse"),
     identityProviderForm: document.getElementById("identityProviderForm"),
+    identityProviderId: document.getElementById("identityProviderId"),
     identityProviderKind: document.getElementById("identityProviderKind"),
     identityProviderName: document.getElementById("identityProviderName"),
     identityProviderIssuer: document.getElementById("identityProviderIssuer"),
@@ -128,7 +130,19 @@ export function mountEducationWorkspace({
     identityProviderTokenEndpoint: document.getElementById("identityProviderTokenEndpoint"),
     identityProviderJwksUri: document.getElementById("identityProviderJwksUri"),
     identityProviderSecretEnv: document.getElementById("identityProviderSecretEnv"),
+    identityProviderTokenAuthMethod: document.getElementById(
+      "identityProviderTokenAuthMethod",
+    ),
+    identityProviderPrivateKeyEnv: document.getElementById(
+      "identityProviderPrivateKeyEnv",
+    ),
+    identityProviderPrivateKeyKid: document.getElementById(
+      "identityProviderPrivateKeyKid",
+    ),
     identityProviderDeploymentId: document.getElementById("identityProviderDeploymentId"),
+    identityProviderEnabled: document.getElementById("identityProviderEnabled"),
+    identityProviderSubmit: document.getElementById("identityProviderSubmitButton"),
+    identityProviderCancel: document.getElementById("identityProviderCancelButton"),
     assignmentForm: document.getElementById("assignmentForm"),
     assignmentTitle: document.getElementById("assignmentTitle"),
     assignmentInstructions: document.getElementById("assignmentInstructions"),
@@ -147,6 +161,8 @@ export function mountEducationWorkspace({
     memberList: document.getElementById("educationMembersList"),
     invitationList: document.getElementById("educationInvitationsList"),
     providerList: document.getElementById("educationProvidersList"),
+    ltiServices: document.getElementById("educationLtiServices"),
+    ltiServiceBadge: document.getElementById("ltiServiceBadge"),
     auditList: document.getElementById("educationAuditList"),
     assignmentCount: document.getElementById("assignmentCount"),
     projectCount: document.getElementById("projectCount"),
@@ -166,6 +182,7 @@ export function mountEducationWorkspace({
     members: [],
     invitations: [],
     providers: [],
+    ltiService: null,
     auditEvents: [],
     activeProjectId: null,
   };
@@ -412,6 +429,17 @@ export function mountEducationWorkspace({
         feedback.dataset.gradeFeedback = submission.id;
         grade.append(score, gradeButton, feedback);
         item.append(grade);
+        if (submission.status === "graded" && state.ltiService?.ags?.canSendScores) {
+          const actions = document.createElement("div");
+          actions.className = "education-item-actions";
+          const passbackButton = document.createElement("button");
+          passbackButton.type = "button";
+          passbackButton.dataset.action = "lti-grade-passback";
+          passbackButton.dataset.submissionId = submission.id;
+          passbackButton.textContent = "LMS로 성적 전송";
+          actions.append(passbackButton);
+          item.append(actions);
+        }
       } else if (submission.feedback) {
         const feedback = document.createElement("p");
         feedback.textContent = `교수 피드백: ${submission.feedback}`;
@@ -525,8 +553,65 @@ export function mountEducationWorkspace({
           `${location.origin}/api/auth/lti/login · ${location.origin}/api/auth/lti/launch`;
         item.append(link);
       }
+      const actions = document.createElement("div");
+      actions.className = "education-item-actions";
+      const editButton = document.createElement("button");
+      editButton.type = "button";
+      editButton.dataset.action = "edit-provider";
+      editButton.dataset.providerId = provider.id;
+      editButton.textContent = "편집";
+      const toggleButton = document.createElement("button");
+      toggleButton.type = "button";
+      toggleButton.dataset.action = "toggle-provider";
+      toggleButton.dataset.providerId = provider.id;
+      toggleButton.textContent = provider.enabled ? "비활성화" : "활성화";
+      if (provider.enabled) toggleButton.className = "danger";
+      actions.append(editButton, toggleButton);
+      item.append(actions);
       elements.providerList.append(item);
     }
+  }
+
+  function renderLtiServices() {
+    elements.ltiServices.replaceChildren();
+    const service = state.ltiService;
+    elements.ltiServiceBadge.textContent = service?.connected ? "연결됨" : "미연결";
+    if (!service?.connected) {
+      elements.ltiServices.append(
+        createEmpty("이 강좌는 아직 LMS의 LTI Context와 연결되지 않았습니다."),
+      );
+      return;
+    }
+    const item = document.createElement("article");
+    item.className = "education-list-item lti-service";
+    const title = document.createElement("strong");
+    title.textContent = `${service.provider.name} · ${service.contextId}`;
+    const description = document.createElement("p");
+    description.textContent = service.lastRosterSyncAt
+      ? `마지막 명단 동기화 ${formatDate(service.lastRosterSyncAt)}`
+      : "명단을 아직 동기화하지 않았습니다.";
+    item.append(
+      title,
+      description,
+      createMeta([
+        service.nrps.available ? "NRPS 사용 가능" : "NRPS 없음",
+        service.ags.canCreateLineItems ? "AGS LineItem" : null,
+        service.ags.canSendScores ? "AGS Score" : "성적 전송 불가",
+        service.provider.enabled ? "공급자 활성" : "공급자 비활성",
+      ]),
+    );
+    if (service.nrps.available && service.provider.enabled) {
+      const actions = document.createElement("div");
+      actions.className = "education-item-actions";
+      const syncButton = document.createElement("button");
+      syncButton.type = "button";
+      syncButton.className = "primary";
+      syncButton.dataset.action = "sync-lti-roster";
+      syncButton.textContent = "LMS 명단 동기화";
+      actions.append(syncButton);
+      item.append(actions);
+    }
+    elements.ltiServices.append(item);
   }
 
   function renderAuditEvents() {
@@ -564,6 +649,7 @@ export function mountEducationWorkspace({
     elements.instructorOperations.hidden = !isInstructor();
     elements.invitationsPanel.hidden = !isAdmin();
     elements.providersPanel.hidden = !isAdmin();
+    elements.ltiServicesPanel.hidden = !isInstructor();
     elements.auditPanel.hidden = !isAdmin();
     elements.courseCodePanel.hidden = !course?.joinCode;
     elements.courseJoinCodeDisplay.textContent = course?.joinCode || "-";
@@ -574,6 +660,7 @@ export function mountEducationWorkspace({
     renderMembers();
     renderInvitations();
     renderProviders();
+    renderLtiServices();
     renderAuditEvents();
   }
 
@@ -585,6 +672,7 @@ export function mountEducationWorkspace({
       state.projects = [];
       state.submissions = [];
       state.members = [];
+      state.ltiService = null;
       renderWorkspace();
       return;
     }
@@ -593,13 +681,17 @@ export function mountEducationWorkspace({
       api.listProjects(courseId),
       api.listSubmissions(courseId),
     ];
-    if (isInstructor()) requests.push(api.listCourseMembers(courseId));
-    const [assignments, projects, submissions, members = []] =
+    if (isInstructor()) {
+      requests.push(api.listCourseMembers(courseId));
+      requests.push(api.getLtiCourseService(courseId));
+    }
+    const [assignments, projects, submissions, members = [], ltiService = null] =
       await Promise.all(requests);
     state.assignments = assignments;
     state.projects = projects;
     state.submissions = submissions;
     state.members = members;
+    state.ltiService = ltiService;
     renderWorkspace();
   }
 
@@ -737,11 +829,55 @@ export function mountEducationWorkspace({
 
   function updateIdentityProviderFields() {
     const oidc = elements.identityProviderKind.value === "oidc";
+    const privateKeyJwt =
+      elements.identityProviderTokenAuthMethod.value === "private_key_jwt";
     elements.identityProviderTokenEndpoint.required = oidc;
     elements.identityProviderDeploymentId.required = !oidc;
+    elements.identityProviderPrivateKeyEnv.required = !oidc && privateKeyJwt;
   }
+
+  function resetIdentityProviderForm() {
+    elements.identityProviderForm.reset();
+    elements.identityProviderId.value = "";
+    elements.identityProviderEnabled.checked = true;
+    elements.identityProviderSubmit.textContent = "인증 공급자 저장";
+    elements.identityProviderCancel.hidden = true;
+    elements.identityProviderKind.disabled = false;
+    updateIdentityProviderFields();
+  }
+
+  function editIdentityProvider(provider) {
+    elements.identityProviderId.value = provider.id;
+    elements.identityProviderKind.value = provider.kind;
+    elements.identityProviderKind.disabled = true;
+    elements.identityProviderName.value = provider.name || "";
+    elements.identityProviderIssuer.value = provider.issuer || "";
+    elements.identityProviderClientId.value = provider.clientId || "";
+    elements.identityProviderDefaultRole.value = provider.defaultRole || "student";
+    elements.identityProviderAuthorizationEndpoint.value =
+      provider.authorizationEndpoint || "";
+    elements.identityProviderTokenEndpoint.value = provider.tokenEndpoint || "";
+    elements.identityProviderJwksUri.value = provider.jwksUri || "";
+    elements.identityProviderSecretEnv.value = provider.clientSecretEnv || "";
+    elements.identityProviderTokenAuthMethod.value =
+      provider.serviceTokenAuthMethod || "client_secret_basic";
+    elements.identityProviderPrivateKeyEnv.value = provider.privateKeyEnv || "";
+    elements.identityProviderPrivateKeyKid.value = provider.privateKeyKid || "";
+    elements.identityProviderDeploymentId.value = provider.deploymentId || "";
+    elements.identityProviderEnabled.checked = provider.enabled;
+    elements.identityProviderSubmit.textContent = "인증 공급자 변경 저장";
+    elements.identityProviderCancel.hidden = false;
+    elements.identityProviderForm.closest("details").open = true;
+    updateIdentityProviderFields();
+  }
+
   updateIdentityProviderFields();
   elements.identityProviderKind.addEventListener("change", updateIdentityProviderFields);
+  elements.identityProviderTokenAuthMethod.addEventListener(
+    "change",
+    updateIdentityProviderFields,
+  );
+  elements.identityProviderCancel.addEventListener("click", resetIdentityProviderForm);
 
   elements.loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -913,6 +1049,7 @@ export function mountEducationWorkspace({
       state.members = [];
       state.invitations = [];
       state.providers = [];
+      state.ltiService = null;
       state.auditEvents = [];
       state.activeProjectId = null;
       updateIdentity();
@@ -979,7 +1116,8 @@ export function mountEducationWorkspace({
   elements.identityProviderForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
-      const provider = await api.createIdentityProvider({
+      const providerId = elements.identityProviderId.value;
+      const payload = {
         kind: elements.identityProviderKind.value,
         name: elements.identityProviderName.value,
         issuer: elements.identityProviderIssuer.value,
@@ -988,15 +1126,71 @@ export function mountEducationWorkspace({
         tokenEndpoint: elements.identityProviderTokenEndpoint.value,
         jwksUri: elements.identityProviderJwksUri.value,
         clientSecretEnv: elements.identityProviderSecretEnv.value,
+        serviceTokenAuthMethod: elements.identityProviderTokenAuthMethod.value,
+        privateKeyEnv: elements.identityProviderPrivateKeyEnv.value,
+        privateKeyKid: elements.identityProviderPrivateKeyKid.value,
         deploymentId: elements.identityProviderDeploymentId.value,
         defaultRole: elements.identityProviderDefaultRole.value,
-      });
-      elements.identityProviderForm.reset();
-      updateIdentityProviderFields();
+        enabled: elements.identityProviderEnabled.checked,
+      };
+      const provider = providerId
+        ? await api.updateIdentityProvider(providerId, payload)
+        : await api.createIdentityProvider(payload);
+      resetIdentityProviderForm();
       await refreshAdminData();
+      if (currentCourseId()) await refreshCourseData();
       renderWorkspace();
-      setStatus(`${provider.name} ${provider.kind.toUpperCase()} 설정을 저장했습니다.`, "success");
+      setStatus(
+        `${provider.name} ${provider.kind.toUpperCase()} 설정을 저장했습니다.`,
+        "success",
+      );
     } catch (error) {
+      setStatus(error.message, "error");
+    }
+  });
+
+  elements.providerList.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const provider = state.providers.find(
+      (item) => item.id === button.dataset.providerId,
+    );
+    if (!provider) return;
+    if (button.dataset.action === "edit-provider") {
+      editIdentityProvider(provider);
+      return;
+    }
+    if (button.dataset.action !== "toggle-provider") return;
+    try {
+      await api.updateIdentityProvider(provider.id, {
+        enabled: !provider.enabled,
+      });
+      await refreshAdminData();
+      if (currentCourseId()) await refreshCourseData();
+      renderWorkspace();
+      setStatus(
+        `${provider.name} 공급자를 ${provider.enabled ? "비활성화" : "활성화"}했습니다.`,
+        "success",
+      );
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
+  });
+
+  elements.ltiServices.addEventListener("click", async (event) => {
+    const button = event.target.closest('[data-action="sync-lti-roster"]');
+    if (!button) return;
+    try {
+      button.disabled = true;
+      setStatus("LMS에서 강좌 명단을 동기화하는 중입니다.");
+      const result = await api.syncLtiRoster(currentCourseId());
+      await refreshCourseData();
+      setStatus(
+        `LMS 명단 ${result.received}명 확인, ${result.enrolled}명 배정, ${result.created}명 계정 생성`,
+        "success",
+      );
+    } catch (error) {
+      button.disabled = false;
       setStatus(error.message, "error");
     }
   });
@@ -1110,9 +1304,25 @@ export function mountEducationWorkspace({
   });
 
   elements.submissionList.addEventListener("click", async (event) => {
-    const button = event.target.closest('[data-action="grade-submission"]');
+    const button = event.target.closest("[data-action]");
     if (!button) return;
     const submissionId = button.dataset.submissionId;
+    if (button.dataset.action === "lti-grade-passback") {
+      try {
+        button.disabled = true;
+        setStatus("채점 결과를 LMS로 전송하는 중입니다.");
+        const result = await api.sendLtiGrade(submissionId);
+        setStatus(
+          `LMS 성적 전송 완료: ${result.score}점 · ${formatDate(result.sentAt)}`,
+          "success",
+        );
+      } catch (error) {
+        button.disabled = false;
+        setStatus(error.message, "error");
+      }
+      return;
+    }
+    if (button.dataset.action !== "grade-submission") return;
     try {
       const score = elements.submissionList
         .querySelector(`[data-grade-score="${submissionId}"]`).value;

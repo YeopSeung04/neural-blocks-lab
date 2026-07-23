@@ -26,6 +26,18 @@ const queue = [
   response(201, {
     invitation: { id: "invite_1", email: "professor@example.edu" },
   }),
+  response(200, {
+    provider: { id: "provider_1", enabled: false },
+  }),
+  response(200, {
+    service: { connected: true, nrps: { available: true } },
+  }),
+  response(200, {
+    sync: { received: 12, enrolled: 12 },
+  }),
+  response(200, {
+    passback: { status: "sent", score: 94 },
+  }),
   response(403, {
     error: { code: "forbidden", message: "Denied" },
   }),
@@ -45,9 +57,18 @@ await api.createInvitation({
   role: "professor",
   courseId: "course_1",
 });
+await api.updateIdentityProvider("provider_1", { enabled: false });
+await api.getLtiCourseService("course_1");
+await api.syncLtiRoster("course_1");
+await api.sendLtiGrade("submission_1");
 assert.equal(requests[1].options.headers["X-CSRF-Token"], undefined);
 assert.equal(requests[2].options.headers["X-CSRF-Token"], "csrf-token");
 assert.equal(requests[4].options.headers["X-CSRF-Token"], "csrf-token");
+assert.equal(requests[5].options.method, "PUT");
+assert.equal(requests[5].options.headers["X-CSRF-Token"], "csrf-token");
+assert.equal(requests[6].options.method, "GET");
+assert.equal(requests[7].options.headers["X-CSRF-Token"], "csrf-token");
+assert.equal(requests[8].path, "/api/submissions/submission_1/lti-grade-passback");
 assert.equal(requests[2].options.credentials, "same-origin");
 
 await assert.rejects(

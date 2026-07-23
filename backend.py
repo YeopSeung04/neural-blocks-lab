@@ -269,6 +269,9 @@ class NeuralBlocksBackend:
                     token_endpoint TEXT,
                     jwks_uri TEXT NOT NULL,
                     client_secret_env TEXT,
+                    service_token_auth_method TEXT NOT NULL DEFAULT 'client_secret_basic',
+                    private_key_env TEXT,
+                    private_key_kid TEXT,
                     deployment_id TEXT,
                     default_role TEXT NOT NULL CHECK(default_role IN ('professor', 'student')),
                     enabled INTEGER NOT NULL DEFAULT 1,
@@ -301,8 +304,46 @@ class NeuralBlocksBackend:
                     provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
                     context_id TEXT NOT NULL,
                     course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+                    resource_link_id TEXT,
+                    nrps_memberships_url TEXT,
+                    nrps_scope_json TEXT NOT NULL DEFAULT '[]',
+                    ags_lineitems_url TEXT,
+                    ags_lineitem_url TEXT,
+                    ags_scope_json TEXT NOT NULL DEFAULT '[]',
+                    last_roster_sync_at TEXT,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(provider_id, context_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS lti_memberships (
+                    provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
+                    context_id TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    roles_json TEXT NOT NULL,
+                    synced_at TEXT NOT NULL,
+                    PRIMARY KEY(provider_id, context_id, subject)
+                );
+
+                CREATE TABLE IF NOT EXISTS lti_line_items (
+                    assignment_id TEXT PRIMARY KEY REFERENCES assignments(id) ON DELETE CASCADE,
+                    provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
+                    context_id TEXT NOT NULL,
+                    lineitem_url TEXT NOT NULL,
+                    score_maximum REAL NOT NULL DEFAULT 100,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS lti_grade_passbacks (
+                    id TEXT PRIMARY KEY,
+                    submission_id TEXT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+                    provider_id TEXT NOT NULL REFERENCES identity_providers(id) ON DELETE CASCADE,
+                    lineitem_url TEXT NOT NULL,
+                    score_given REAL NOT NULL,
+                    response_json TEXT NOT NULL,
+                    sent_by TEXT NOT NULL REFERENCES users(id),
+                    sent_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
@@ -314,6 +355,8 @@ class NeuralBlocksBackend:
                 CREATE INDEX IF NOT EXISTS idx_email_tokens_user ON email_tokens(user_id, purpose);
                 CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_events(tenant_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_identity_providers_tenant ON identity_providers(tenant_id);
+                CREATE INDEX IF NOT EXISTS idx_lti_memberships_user ON lti_memberships(user_id);
+                CREATE INDEX IF NOT EXISTS idx_lti_passbacks_submission ON lti_grade_passbacks(submission_id, sent_at);
                 """
             )
         self.database.add_column_if_missing("users", "email_verified_at", "TEXT")
@@ -323,6 +366,56 @@ class NeuralBlocksBackend:
             "TEXT NOT NULL DEFAULT 'password'",
         )
         self.database.add_column_if_missing("users", "external_subject", "TEXT")
+        self.database.add_column_if_missing(
+            "identity_providers",
+            "service_token_auth_method",
+            "TEXT NOT NULL DEFAULT 'client_secret_basic'",
+        )
+        self.database.add_column_if_missing(
+            "identity_providers",
+            "private_key_env",
+            "TEXT",
+        )
+        self.database.add_column_if_missing(
+            "identity_providers",
+            "private_key_kid",
+            "TEXT",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "resource_link_id",
+            "TEXT",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "nrps_memberships_url",
+            "TEXT",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "nrps_scope_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "ags_lineitems_url",
+            "TEXT",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "ags_lineitem_url",
+            "TEXT",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "ags_scope_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self.database.add_column_if_missing(
+            "lti_contexts",
+            "last_roster_sync_at",
+            "TEXT",
+        )
         if previous_user_columns and "email_verified_at" not in previous_user_columns:
             with self.connect() as db:
                 db.execute(
@@ -1241,6 +1334,22 @@ class NeuralBlocksBackend:
                 "Client secret environment variable name is invalid",
                 "validation_error",
             )
+        service_token_auth_method = str(
+            payload.get("serviceTokenAuthMethod") or "client_secret_basic"
+        ).strip()
+        if service_token_auth_method not in ("client_secret_basic", "private_key_jwt"):
+            raise ApiError(
+                400,
+                "LTI service token authentication method is invalid",
+                "validation_error",
+            )
+        private_key_env = str(payload.get("privateKeyEnv") or "").strip() or None
+        if private_key_env and not re.fullmatch(r"[A-Z][A-Z0-9_]{2,80}", private_key_env):
+            raise ApiError(
+                400,
+                "Private key environment variable name is invalid",
+                "validation_error",
+            )
         provider = {
             "id": new_id("provider"),
             "tenant_id": auth["user"]["tenantId"],
@@ -1256,6 +1365,9 @@ class NeuralBlocksBackend:
             "token_endpoint": str(payload.get("tokenEndpoint") or "").strip() or None,
             "jwks_uri": required_text(payload.get("jwksUri"), "JWKS URI", 1000),
             "client_secret_env": client_secret_env,
+            "service_token_auth_method": service_token_auth_method,
+            "private_key_env": private_key_env,
+            "private_key_kid": str(payload.get("privateKeyKid") or "").strip() or None,
             "deployment_id": str(payload.get("deploymentId") or "").strip() or None,
             "default_role": default_role,
             "enabled": 1 if payload.get("enabled", True) else 0,
@@ -1266,6 +1378,16 @@ class NeuralBlocksBackend:
             raise ApiError(400, "OIDC token endpoint is required", "validation_error")
         if kind == "lti" and not provider["deployment_id"]:
             raise ApiError(400, "LTI deployment ID is required", "validation_error")
+        if (
+            kind == "lti"
+            and service_token_auth_method == "private_key_jwt"
+            and not private_key_env
+        ):
+            raise ApiError(
+                400,
+                "Private key environment variable is required",
+                "validation_error",
+            )
         with self.connect() as db:
             try:
                 db.execute(
@@ -1273,12 +1395,14 @@ class NeuralBlocksBackend:
                     INSERT INTO identity_providers(
                         id, tenant_id, kind, name, issuer, client_id,
                         authorization_endpoint, token_endpoint, jwks_uri,
-                        client_secret_env, deployment_id, default_role,
+                        client_secret_env, service_token_auth_method,
+                        private_key_env, private_key_kid, deployment_id, default_role,
                         enabled, created_by, created_at
                     ) VALUES (
                         :id, :tenant_id, :kind, :name, :issuer, :client_id,
                         :authorization_endpoint, :token_endpoint, :jwks_uri,
-                        :client_secret_env, :deployment_id, :default_role,
+                        :client_secret_env, :service_token_auth_method,
+                        :private_key_env, :private_key_kid, :deployment_id, :default_role,
                         :enabled, :created_by, :created_at
                     )
                     """,
@@ -1310,13 +1434,167 @@ class NeuralBlocksBackend:
             "tokenEndpoint": data["token_endpoint"],
             "jwksUri": data["jwks_uri"],
             "deploymentId": data["deployment_id"],
+            "serviceTokenAuthMethod": data.get("service_token_auth_method")
+            or "client_secret_basic",
+            "privateKeyKid": data.get("private_key_kid"),
             "defaultRole": data["default_role"],
             "enabled": bool(data["enabled"]),
             "createdAt": data["created_at"],
         }
         if include_private:
             payload["clientSecretEnv"] = data["client_secret_env"]
+            payload["privateKeyEnv"] = data.get("private_key_env")
         return payload
+
+    def update_identity_provider(self, auth, provider_id, payload):
+        self.require_role(auth, "admin")
+        self.require_verified(auth)
+        with self.connect() as db:
+            current = db.execute(
+                """
+                SELECT * FROM identity_providers
+                WHERE id = ? AND tenant_id = ?
+                """,
+                (provider_id, auth["user"]["tenantId"]),
+            ).fetchone()
+            if not current:
+                raise ApiError(404, "Identity provider was not found", "not_found")
+            current = row_dict(current)
+            field_map = {
+                "name": "name",
+                "issuer": "issuer",
+                "clientId": "client_id",
+                "authorizationEndpoint": "authorization_endpoint",
+                "tokenEndpoint": "token_endpoint",
+                "jwksUri": "jwks_uri",
+                "clientSecretEnv": "client_secret_env",
+                "serviceTokenAuthMethod": "service_token_auth_method",
+                "privateKeyEnv": "private_key_env",
+                "privateKeyKid": "private_key_kid",
+                "deploymentId": "deployment_id",
+                "defaultRole": "default_role",
+                "enabled": "enabled",
+            }
+            values = dict(current)
+            for source, target in field_map.items():
+                if source in payload:
+                    values[target] = payload[source]
+            values["name"] = required_text(values["name"], "Provider name", 100)
+            values["issuer"] = required_text(
+                values["issuer"],
+                "Issuer",
+                500,
+            ).rstrip("/")
+            values["client_id"] = required_text(
+                values["client_id"],
+                "Client ID",
+                300,
+            )
+            values["authorization_endpoint"] = required_text(
+                values["authorization_endpoint"],
+                "Authorization endpoint",
+                1000,
+            )
+            values["token_endpoint"] = (
+                str(values.get("token_endpoint") or "").strip() or None
+            )
+            values["jwks_uri"] = required_text(
+                values["jwks_uri"],
+                "JWKS URI",
+                1000,
+            )
+            for key, label in (
+                ("client_secret_env", "Client secret"),
+                ("private_key_env", "Private key"),
+            ):
+                values[key] = str(values.get(key) or "").strip() or None
+                if values[key] and not re.fullmatch(
+                    r"[A-Z][A-Z0-9_]{2,80}",
+                    values[key],
+                ):
+                    raise ApiError(
+                        400,
+                        f"{label} environment variable name is invalid",
+                        "validation_error",
+                    )
+            values["service_token_auth_method"] = str(
+                values.get("service_token_auth_method") or "client_secret_basic"
+            )
+            if values["service_token_auth_method"] not in (
+                "client_secret_basic",
+                "private_key_jwt",
+            ):
+                raise ApiError(
+                    400,
+                    "LTI service token authentication method is invalid",
+                    "validation_error",
+                )
+            values["private_key_kid"] = (
+                str(values.get("private_key_kid") or "").strip() or None
+            )
+            values["deployment_id"] = (
+                str(values.get("deployment_id") or "").strip() or None
+            )
+            values["default_role"] = str(values.get("default_role") or "student")
+            if values["default_role"] not in ("professor", "student"):
+                raise ApiError(400, "Default role is invalid", "validation_error")
+            values["enabled"] = 1 if bool(values.get("enabled")) else 0
+            if values["kind"] == "oidc" and not values["token_endpoint"]:
+                raise ApiError(400, "OIDC token endpoint is required", "validation_error")
+            if values["kind"] == "lti" and not values["deployment_id"]:
+                raise ApiError(400, "LTI deployment ID is required", "validation_error")
+            if (
+                values["kind"] == "lti"
+                and values["service_token_auth_method"] == "private_key_jwt"
+                and not values["private_key_env"]
+            ):
+                raise ApiError(
+                    400,
+                    "Private key environment variable is required",
+                    "validation_error",
+                )
+            try:
+                db.execute(
+                    """
+                    UPDATE identity_providers
+                    SET name = :name,
+                        issuer = :issuer,
+                        client_id = :client_id,
+                        authorization_endpoint = :authorization_endpoint,
+                        token_endpoint = :token_endpoint,
+                        jwks_uri = :jwks_uri,
+                        client_secret_env = :client_secret_env,
+                        service_token_auth_method = :service_token_auth_method,
+                        private_key_env = :private_key_env,
+                        private_key_kid = :private_key_kid,
+                        deployment_id = :deployment_id,
+                        default_role = :default_role,
+                        enabled = :enabled
+                    WHERE id = :id AND tenant_id = :tenant_id
+                    """,
+                    values,
+                )
+            except DatabaseIntegrityError:
+                raise ApiError(409, "Identity provider is already configured", "conflict")
+            self.record_audit(
+                db,
+                "identity_provider.updated",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "identity_provider",
+                provider_id,
+                {
+                    "kind": values["kind"],
+                    "enabled": bool(values["enabled"]),
+                    "tokenAuthMethod": values["service_token_auth_method"],
+                },
+                auth.get("_request"),
+            )
+            updated = db.execute(
+                "SELECT * FROM identity_providers WHERE id = ?",
+                (provider_id,),
+            ).fetchone()
+        return self.identity_provider_payload(updated, include_private=True)
 
     def list_identity_providers(self, auth):
         self.require_role(auth, "admin")
@@ -1605,6 +1883,95 @@ class NeuralBlocksBackend:
                             """,
                             (provider["id"], context_id, course_id, now),
                         )
+                    nrps_claim = claims.get(
+                        "https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice",
+                        {},
+                    )
+                    ags_claim = claims.get(
+                        "https://purl.imsglobal.org/spec/lti-ags/claim/endpoint",
+                        {},
+                    )
+                    resource_link_claim = claims.get(
+                        "https://purl.imsglobal.org/spec/lti/claim/resource_link",
+                        {},
+                    )
+                    stored_context = db.execute(
+                        """
+                        SELECT * FROM lti_contexts
+                        WHERE provider_id = ? AND context_id = ?
+                        """,
+                        (provider["id"], context_id),
+                    ).fetchone()
+                    has_nrps_claim = (
+                        "https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice"
+                        in claims
+                    )
+                    has_ags_claim = (
+                        "https://purl.imsglobal.org/spec/lti-ags/claim/endpoint"
+                        in claims
+                    )
+                    has_resource_link_claim = (
+                        "https://purl.imsglobal.org/spec/lti/claim/resource_link"
+                        in claims
+                    )
+                    db.execute(
+                        """
+                        UPDATE lti_contexts
+                        SET resource_link_id = ?,
+                            nrps_memberships_url = ?,
+                            nrps_scope_json = ?,
+                            ags_lineitems_url = ?,
+                            ags_lineitem_url = ?,
+                            ags_scope_json = ?
+                        WHERE provider_id = ? AND context_id = ?
+                        """,
+                        (
+                            (
+                                str(resource_link_claim.get("id") or "").strip()
+                                or None
+                                if has_resource_link_claim
+                                else stored_context["resource_link_id"]
+                            ),
+                            (
+                                str(
+                                    nrps_claim.get("context_memberships_url") or ""
+                                ).strip()
+                                or None
+                                if has_nrps_claim
+                                else stored_context["nrps_memberships_url"]
+                            ),
+                            (
+                                compact_json(
+                                    [
+                                        "https://purl.imsglobal.org/spec/lti-nrps/scope/contextmembership.readonly"
+                                    ]
+                                    if nrps_claim.get("context_memberships_url")
+                                    else []
+                                )
+                                if has_nrps_claim
+                                else stored_context["nrps_scope_json"]
+                            ),
+                            (
+                                str(ags_claim.get("lineitems") or "").strip()
+                                or None
+                                if has_ags_claim
+                                else stored_context["ags_lineitems_url"]
+                            ),
+                            (
+                                str(ags_claim.get("lineitem") or "").strip()
+                                or None
+                                if has_ags_claim
+                                else stored_context["ags_lineitem_url"]
+                            ),
+                            (
+                                compact_json(ags_claim.get("scope") or [])
+                                if has_ags_claim
+                                else stored_context["ags_scope_json"]
+                            ),
+                            provider["id"],
+                            context_id,
+                        ),
+                    )
                     enrollment_role = "instructor" if role in ("admin", "professor") else "student"
                     db.execute(
                         """
@@ -1631,6 +1998,480 @@ class NeuralBlocksBackend:
         auth["sessionToken"] = session_token
         auth["courseId"] = course_id
         return auth
+
+    def get_lti_course_service(self, auth, course_id, include_private=False):
+        self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
+        with self.connect() as db:
+            self.course_access(db, auth, course_id, instructor=True)
+            context = db.execute(
+                """
+                SELECT *
+                FROM lti_contexts
+                WHERE course_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (course_id,),
+            ).fetchone()
+            if not context:
+                return {
+                    "connected": False,
+                    "courseId": course_id,
+                    "nrps": {"available": False},
+                    "ags": {
+                        "available": False,
+                        "canCreateLineItems": False,
+                        "canSendScores": False,
+                    },
+                }
+            provider = db.execute(
+                """
+                SELECT * FROM identity_providers
+                WHERE id = ? AND tenant_id = ?
+                """,
+                (context["provider_id"], auth["user"]["tenantId"]),
+            ).fetchone()
+            if not provider:
+                raise ApiError(404, "LTI provider was not found", "not_found")
+            provider_data = row_dict(provider)
+            context_data = row_dict(context)
+        ags_scopes = parse_json(context_data.get("ags_scope_json"), [])
+        nrps_scopes = parse_json(context_data.get("nrps_scope_json"), [])
+        payload = {
+            "connected": True,
+            "courseId": course_id,
+            "provider": self.identity_provider_payload(
+                provider_data,
+                include_private=include_private,
+            ),
+            "contextId": context_data["context_id"],
+            "resourceLinkId": context_data.get("resource_link_id"),
+            "lastRosterSyncAt": context_data.get("last_roster_sync_at"),
+            "nrps": {
+                "available": bool(context_data.get("nrps_memberships_url")),
+                "membershipsUrl": context_data.get("nrps_memberships_url"),
+                "scopes": nrps_scopes,
+            },
+            "ags": {
+                "available": bool(
+                    context_data.get("ags_lineitems_url")
+                    or context_data.get("ags_lineitem_url")
+                ),
+                "lineitemsUrl": context_data.get("ags_lineitems_url"),
+                "lineitemUrl": context_data.get("ags_lineitem_url"),
+                "scopes": ags_scopes,
+                "canCreateLineItems": (
+                    "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem"
+                    in ags_scopes
+                    and bool(context_data.get("ags_lineitems_url"))
+                ),
+                "canSendScores": (
+                    "https://purl.imsglobal.org/spec/lti-ags/scope/score"
+                    in ags_scopes
+                ),
+            },
+        }
+        if include_private:
+            payload["_provider"] = provider_data
+        return payload
+
+    def apply_lti_roster(self, auth, course_id, provider_id, context_id, members):
+        self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
+        if not isinstance(members, list):
+            raise ApiError(400, "NRPS members must be an array", "validation_error")
+        if len(members) > 10000:
+            raise ApiError(413, "NRPS roster is too large", "payload_too_large")
+        now = iso_time()
+        counts = {
+            "received": len(members),
+            "created": 0,
+            "enrolled": 0,
+            "inactive": 0,
+            "missing": 0,
+        }
+        seen_subjects = set()
+        with self.connect() as db:
+            course = self.course_access(db, auth, course_id, instructor=True)
+            context = db.execute(
+                """
+                SELECT * FROM lti_contexts
+                WHERE provider_id = ? AND context_id = ? AND course_id = ?
+                """,
+                (provider_id, context_id, course_id),
+            ).fetchone()
+            if not context:
+                raise ApiError(404, "LTI course context was not found", "not_found")
+            provider = db.execute(
+                """
+                SELECT p.*, t.slug AS tenant_slug
+                FROM identity_providers p
+                JOIN tenants t ON t.id = p.tenant_id
+                WHERE p.id = ? AND p.tenant_id = ? AND p.enabled = 1
+                """,
+                (provider_id, auth["user"]["tenantId"]),
+            ).fetchone()
+            if not provider:
+                raise ApiError(404, "Active LTI provider was not found", "not_found")
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                subject = str(member.get("user_id") or "").strip()
+                if not subject or len(subject) > 500:
+                    continue
+                seen_subjects.add(subject)
+                status = str(member.get("status") or "Active")[:40]
+                roles = member.get("roles") if isinstance(member.get("roles"), list) else []
+                instructor = any(
+                    marker in str(role)
+                    for role in roles
+                    for marker in ("Instructor", "Administrator", "TeachingAssistant")
+                )
+                identity = db.execute(
+                    """
+                    SELECT u.*
+                    FROM external_identities e
+                    JOIN users u ON u.id = e.user_id
+                    WHERE e.provider_id = ? AND e.subject = ?
+                    """,
+                    (provider_id, subject),
+                ).fetchone()
+                if identity:
+                    user_id = identity["id"]
+                    if instructor and identity["role"] == "student":
+                        db.execute(
+                            "UPDATE users SET role = 'professor' WHERE id = ?",
+                            (user_id,),
+                        )
+                else:
+                    email = str(member.get("email") or "").strip().lower()
+                    if not EMAIL_PATTERN.match(email):
+                        digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:18]
+                        email = f"federated-{digest}@{provider['tenant_slug']}.invalid"
+                    existing = db.execute(
+                        "SELECT * FROM users WHERE email = ?",
+                        (email,),
+                    ).fetchone()
+                    if existing and existing["tenant_id"] != provider["tenant_id"]:
+                        digest = hashlib.sha256(
+                            f"{provider_id}:{subject}".encode("utf-8")
+                        ).hexdigest()[:18]
+                        email = f"federated-{digest}@{provider['tenant_slug']}.invalid"
+                        existing = db.execute(
+                            "SELECT * FROM users WHERE email = ?",
+                            (email,),
+                        ).fetchone()
+                    if existing:
+                        user_id = existing["id"]
+                    else:
+                        user_id = new_id("user")
+                        password_salt, password_hash = password_digest(
+                            secrets.token_urlsafe(48)
+                        )
+                        display_name = str(
+                            member.get("name")
+                            or member.get("given_name")
+                            or email.split("@", 1)[0]
+                        )[:80]
+                        db.execute(
+                            """
+                            INSERT INTO users(
+                                id, tenant_id, email, display_name, role,
+                                password_salt, password_hash, email_verified_at,
+                                auth_provider, external_subject, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'lti', ?, ?)
+                            """,
+                            (
+                                user_id,
+                                provider["tenant_id"],
+                                email,
+                                display_name,
+                                "professor" if instructor else "student",
+                                password_salt,
+                                password_hash,
+                                now,
+                                subject,
+                                now,
+                            ),
+                        )
+                        counts["created"] += 1
+                    db.execute(
+                        """
+                        INSERT INTO external_identities(
+                            provider_id, subject, user_id, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(provider_id, subject) DO UPDATE SET user_id = excluded.user_id
+                        """,
+                        (provider_id, subject, user_id, now),
+                    )
+                synced_name = str(
+                    member.get("name")
+                    or " ".join(filter(None, [
+                        str(member.get("given_name") or "").strip(),
+                        str(member.get("family_name") or "").strip(),
+                    ]))
+                ).strip()[:80]
+                if synced_name:
+                    db.execute(
+                        "UPDATE users SET display_name = ? WHERE id = ?",
+                        (synced_name, user_id),
+                    )
+                if instructor:
+                    db.execute(
+                        """
+                        UPDATE users
+                        SET role = 'professor'
+                        WHERE id = ? AND role = 'student'
+                        """,
+                        (user_id,),
+                    )
+                db.execute(
+                    """
+                    INSERT INTO lti_memberships(
+                        provider_id, context_id, subject, user_id,
+                        status, roles_json, synced_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider_id, context_id, subject) DO UPDATE SET
+                        user_id = excluded.user_id,
+                        status = excluded.status,
+                        roles_json = excluded.roles_json,
+                        synced_at = excluded.synced_at
+                    """,
+                    (
+                        provider_id,
+                        context_id,
+                        subject,
+                        user_id,
+                        status,
+                        compact_json(roles),
+                        now,
+                    ),
+                )
+                if status.lower() == "active":
+                    db.execute(
+                        """
+                        INSERT INTO enrollments(course_id, user_id, role, created_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(course_id, user_id) DO UPDATE SET role = excluded.role
+                        """,
+                        (
+                            course_id,
+                            user_id,
+                            "instructor" if instructor else "student",
+                            now,
+                        ),
+                    )
+                    counts["enrolled"] += 1
+                else:
+                    if user_id != course["owner_id"]:
+                        db.execute(
+                            "DELETE FROM enrollments WHERE course_id = ? AND user_id = ?",
+                            (course_id, user_id),
+                        )
+                    counts["inactive"] += 1
+
+            previous = db.execute(
+                """
+                SELECT subject, user_id
+                FROM lti_memberships
+                WHERE provider_id = ? AND context_id = ?
+                """,
+                (provider_id, context_id),
+            ).fetchall()
+            for membership in previous:
+                if membership["subject"] in seen_subjects:
+                    continue
+                db.execute(
+                    """
+                    UPDATE lti_memberships
+                    SET status = 'Missing', synced_at = ?
+                    WHERE provider_id = ? AND context_id = ? AND subject = ?
+                    """,
+                    (now, provider_id, context_id, membership["subject"]),
+                )
+                if membership["user_id"] != course["owner_id"]:
+                    db.execute(
+                        "DELETE FROM enrollments WHERE course_id = ? AND user_id = ?",
+                        (course_id, membership["user_id"]),
+                    )
+                counts["missing"] += 1
+            db.execute(
+                """
+                UPDATE lti_contexts
+                SET last_roster_sync_at = ?
+                WHERE provider_id = ? AND context_id = ?
+                """,
+                (now, provider_id, context_id),
+            )
+            self.record_audit(
+                db,
+                "lti.roster_synced",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "course",
+                course_id,
+                counts,
+                auth.get("_request"),
+            )
+        return {**counts, "syncedAt": now}
+
+    def prepare_lti_grade_passback(self, auth, submission_id):
+        self.require_role(auth, "admin", "professor")
+        self.require_verified(auth)
+        with self.connect() as db:
+            submission = db.execute(
+                """
+                SELECT s.*, a.title AS assignment_title
+                FROM submissions s
+                JOIN assignments a ON a.id = s.assignment_id
+                WHERE s.id = ? AND s.tenant_id = ?
+                """,
+                (submission_id, auth["user"]["tenantId"]),
+            ).fetchone()
+            if not submission:
+                raise ApiError(404, "Submission was not found", "not_found")
+            self.course_access(db, auth, submission["course_id"], instructor=True)
+            if submission["status"] != "graded" or submission["score"] is None:
+                raise ApiError(
+                    409,
+                    "Submission must be graded before LMS passback",
+                    "submission_not_graded",
+                )
+            context = db.execute(
+                """
+                SELECT * FROM lti_contexts
+                WHERE course_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (submission["course_id"],),
+            ).fetchone()
+            if not context:
+                raise ApiError(409, "Course is not connected to LTI", "lti_not_connected")
+            provider = db.execute(
+                """
+                SELECT * FROM identity_providers
+                WHERE id = ? AND tenant_id = ? AND enabled = 1
+                """,
+                (context["provider_id"], auth["user"]["tenantId"]),
+            ).fetchone()
+            if not provider:
+                raise ApiError(409, "LTI provider is disabled", "lti_provider_disabled")
+            identity = db.execute(
+                """
+                SELECT subject FROM external_identities
+                WHERE provider_id = ? AND user_id = ?
+                """,
+                (provider["id"], submission["student_id"]),
+            ).fetchone()
+            if not identity:
+                raise ApiError(
+                    409,
+                    "Student does not have an LMS identity",
+                    "lti_student_identity_missing",
+                )
+            line_item = db.execute(
+                """
+                SELECT * FROM lti_line_items
+                WHERE assignment_id = ?
+                """,
+                (submission["assignment_id"],),
+            ).fetchone()
+            return {
+                "provider": row_dict(provider),
+                "context": row_dict(context),
+                "submissionId": submission["id"],
+                "assignment": {
+                    "id": submission["assignment_id"],
+                    "title": submission["assignment_title"],
+                },
+                "studentSubject": identity["subject"],
+                "score": float(submission["score"]),
+                "feedback": submission["feedback"],
+                "lineitemUrl": (
+                    line_item["lineitem_url"]
+                    if line_item
+                    else context["ags_lineitem_url"]
+                ),
+            }
+
+    def save_lti_line_item(self, auth, plan, lineitem_url):
+        now = iso_time()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO lti_line_items(
+                    assignment_id, provider_id, context_id,
+                    lineitem_url, score_maximum, created_at
+                ) VALUES (?, ?, ?, ?, 100, ?)
+                ON CONFLICT(assignment_id) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    context_id = excluded.context_id,
+                    lineitem_url = excluded.lineitem_url,
+                    score_maximum = excluded.score_maximum
+                """,
+                (
+                    plan["assignment"]["id"],
+                    plan["provider"]["id"],
+                    plan["context"]["context_id"],
+                    lineitem_url,
+                    now,
+                ),
+            )
+            self.record_audit(
+                db,
+                "lti.lineitem_linked",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "assignment",
+                plan["assignment"]["id"],
+                {"lineitemUrl": lineitem_url},
+                auth.get("_request"),
+            )
+        return lineitem_url
+
+    def record_lti_grade_passback(self, auth, plan, lineitem_url, result):
+        sent_at = iso_time()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO lti_grade_passbacks(
+                    id, submission_id, provider_id, lineitem_url,
+                    score_given, response_json, sent_by, sent_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id("passback"),
+                    plan["submissionId"],
+                    plan["provider"]["id"],
+                    lineitem_url,
+                    plan["score"],
+                    compact_json(result.get("response") or {}),
+                    auth["user"]["id"],
+                    sent_at,
+                ),
+            )
+            self.record_audit(
+                db,
+                "lti.grade_passback_sent",
+                auth["user"]["tenantId"],
+                auth["user"]["id"],
+                "submission",
+                plan["submissionId"],
+                {
+                    "score": plan["score"],
+                    "lineitemUrl": lineitem_url,
+                    "studentSubject": plan["studentSubject"],
+                },
+                auth.get("_request"),
+            )
+        return {
+            "status": "sent",
+            "submissionId": plan["submissionId"],
+            "score": plan["score"],
+            "sentAt": sent_at,
+        }
 
     def list_assignments(self, auth, course_id):
         with self.connect() as db:

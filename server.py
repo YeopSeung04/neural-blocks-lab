@@ -14,12 +14,15 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from backend import ApiError, NeuralBlocksBackend
+from backend import ApiError, NeuralBlocksBackend, iso_time, parse_json
 from federation import (
     FederationError,
+    create_ags_line_item,
     exchange_oidc_code,
+    fetch_nrps_members,
     lti_authorization_url,
     oidc_authorization_url,
+    post_ags_score,
     validate_lti_claims,
     verify_id_token,
 )
@@ -314,10 +317,33 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
     def protected_static_path(self, path):
         decoded = unquote(path).replace("\\", "/")
         parts = [part for part in decoded.split("/") if part not in ("", ".")]
-        if any(part in {".data", ".git", "__pycache__"} for part in parts):
+        if any(
+            part.startswith(".") or part in {"__pycache__"}
+            for part in parts
+        ):
             return True
         filename = parts[-1].lower() if parts else ""
-        return filename.endswith((".db", ".db-shm", ".db-wal", ".py", ".pyc"))
+        if filename in {
+            "dockerfile",
+            "docker-compose.yml",
+            "package.json",
+            "package-lock.json",
+            "requirements.txt",
+            "readme.md",
+        }:
+            return True
+        return (
+            filename.endswith((
+                ".db",
+                ".db-shm",
+                ".db-wal",
+                ".py",
+                ".pyc",
+                "-test.mjs",
+                "_test.mjs",
+            ))
+            or filename == "test.mjs"
+        )
 
     def send_json(self, status, data, headers=None):
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -594,6 +620,18 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
                         {"members": self.backend.list_course_members(auth, match.group(1))},
                     )
                     return
+                match = re.fullmatch(r"/api/courses/([^/]+)/lti-services", path)
+                if match:
+                    self.send_json(
+                        200,
+                        {
+                            "service": self.backend.get_lti_course_service(
+                                auth,
+                                match.group(1),
+                            )
+                        },
+                    )
+                    return
                 match = re.fullmatch(r"/api/projects/([^/]+)", path)
                 if match:
                     self.send_json(200, {"project": self.backend.get_project(auth, match.group(1))})
@@ -784,6 +822,42 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
                     {"provider": self.backend.create_identity_provider(auth, payload)},
                 )
                 return
+            match = re.fullmatch(r"/api/courses/([^/]+)/lti/roster-sync", path)
+            if match:
+                course_id = match.group(1)
+                service = self.backend.get_lti_course_service(
+                    auth,
+                    course_id,
+                    include_private=True,
+                )
+                if not service["connected"] or not service["nrps"]["available"]:
+                    raise ApiError(
+                        409,
+                        "NRPS membership service is unavailable",
+                        "nrps_unavailable",
+                    )
+                if not service["provider"]["enabled"]:
+                    raise ApiError(
+                        409,
+                        "LTI provider is disabled",
+                        "lti_provider_disabled",
+                    )
+                provider = service.pop("_provider")
+                roster = fetch_nrps_members(
+                    provider,
+                    service["nrps"]["membershipsUrl"],
+                    service["nrps"]["scopes"],
+                )
+                result = self.backend.apply_lti_roster(
+                    auth,
+                    course_id,
+                    provider["id"],
+                    service["contextId"],
+                    roster["members"],
+                )
+                result["pages"] = roster["pages"]
+                self.send_json(200, {"sync": result})
+                return
             if path == "/api/courses/join":
                 self.send_json(200, {"course": self.backend.join_course(auth, payload)})
                 return
@@ -816,6 +890,58 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
                 )
                 return
             match = re.fullmatch(
+                r"/api/submissions/([^/]+)/lti-grade-passback",
+                path,
+            )
+            if match:
+                plan = self.backend.prepare_lti_grade_passback(auth, match.group(1))
+                context = plan["context"]
+                lineitem_url = plan["lineitemUrl"]
+                if not lineitem_url:
+                    if not context.get("ags_lineitems_url"):
+                        raise ApiError(
+                            409,
+                            "AGS line item service is unavailable",
+                            "ags_lineitem_unavailable",
+                        )
+                    line_item = create_ags_line_item(
+                        plan["provider"],
+                        context["ags_lineitems_url"],
+                        parse_json(context.get("ags_scope_json"), []),
+                        plan["assignment"],
+                    )
+                    lineitem_url = self.backend.save_lti_line_item(
+                        auth,
+                        plan,
+                        line_item["url"],
+                    )
+                else:
+                    self.backend.save_lti_line_item(auth, plan, lineitem_url)
+                result = post_ags_score(
+                    plan["provider"],
+                    lineitem_url,
+                    parse_json(context.get("ags_scope_json"), []),
+                    {
+                        "userId": plan["studentSubject"],
+                        "scoreGiven": plan["score"],
+                        "scoreMaximum": 100,
+                        "timestamp": iso_time(),
+                        "comment": plan["feedback"],
+                    },
+                )
+                self.send_json(
+                    200,
+                    {
+                        "passback": self.backend.record_lti_grade_passback(
+                            auth,
+                            plan,
+                            lineitem_url,
+                            result,
+                        )
+                    },
+                )
+                return
+            match = re.fullmatch(
                 r"/api/courses/([^/]+)/members/([^/]+)/remove",
                 path,
             )
@@ -837,6 +963,34 @@ class NeuralBlocksHandler(SimpleHTTPRequestHandler):
         except Exception as error:
             self.log_error("Unhandled API POST error: %s", error)
             self.send_json(500, {"error": {"code": "server_error", "message": "Internal server error"}})
+
+    def do_PUT(self):
+        path = self.api_path()
+        try:
+            match = re.fullmatch(r"/api/admin/identity-providers/([^/]+)", path)
+            if not match:
+                raise ApiError(404, "API endpoint was not found", "not_found")
+            payload = self.read_json()
+            auth = self.require_auth()
+            self.require_csrf(auth)
+            self.send_json(
+                200,
+                {
+                    "provider": self.backend.update_identity_provider(
+                        auth,
+                        match.group(1),
+                        payload,
+                    )
+                },
+            )
+        except ApiError as error:
+            self.handle_api_error(error)
+        except Exception as error:
+            self.log_error("Unhandled API PUT error: %s", error)
+            self.send_json(
+                500,
+                {"error": {"code": "server_error", "message": "Internal server error"}},
+            )
 
     def log_message(self, format_string, *args):
         if self.api_path() not in ("/api/system-metrics", "/api/health"):

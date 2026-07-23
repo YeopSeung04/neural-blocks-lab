@@ -198,6 +198,33 @@ export class EducationApi {
     })).provider;
   }
 
+  async updateIdentityProvider(providerId, payload) {
+    return (await this.request(
+      `/api/admin/identity-providers/${encodeURIComponent(providerId)}`,
+      { method: "PUT", body: payload },
+    )).provider;
+  }
+
+  async getLtiCourseService(courseId) {
+    return (await this.request(
+      `/api/courses/${encodeURIComponent(courseId)}/lti-services`,
+    )).service;
+  }
+
+  async syncLtiRoster(courseId) {
+    return (await this.request(
+      `/api/courses/${encodeURIComponent(courseId)}/lti/roster-sync`,
+      { method: "POST", body: {} },
+    )).sync;
+  }
+
+  async sendLtiGrade(submissionId) {
+    return (await this.request(
+      `/api/submissions/${encodeURIComponent(submissionId)}/lti-grade-passback`,
+      { method: "POST", body: {} },
+    )).passback;
+  }
+
   async joinCourse(joinCode) {
     return (await this.request("/api/courses/join", {
       method: "POST",

@@ -53,6 +53,26 @@ class PostgresBackendTest(unittest.TestCase):
         })
         self.assertEqual(accepted["user"]["role"], "professor")
         self.assertEqual(len(self.backend.list_course_members(admin, course["id"])), 2)
+        provider = self.backend.create_identity_provider(admin, {
+            "kind": "lti",
+            "name": "Postgres LMS",
+            "issuer": "https://lms.postgres.test",
+            "clientId": "postgres-tool",
+            "authorizationEndpoint": "https://lms.postgres.test/authorize",
+            "tokenEndpoint": "https://lms.postgres.test/token",
+            "jwksUri": "https://lms.postgres.test/jwks",
+            "privateKeyEnv": "NBL_POSTGRES_LTI_PRIVATE_KEY",
+            "privateKeyKid": "postgres-key",
+            "serviceTokenAuthMethod": "private_key_jwt",
+            "deploymentId": "postgres-deployment",
+            "defaultRole": "student",
+        })
+        updated = self.backend.update_identity_provider(admin, provider["id"], {
+            "enabled": False,
+        })
+        self.assertEqual(updated["serviceTokenAuthMethod"], "private_key_jwt")
+        self.assertEqual(updated["privateKeyKid"], "postgres-key")
+        self.assertFalse(updated["enabled"])
         self.assertEqual(self.backend.database.engine, "postgres")
 
 
