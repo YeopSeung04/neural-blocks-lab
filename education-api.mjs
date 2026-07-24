@@ -211,18 +211,60 @@ export class EducationApi {
     )).service;
   }
 
-  async syncLtiRoster(courseId) {
-    return (await this.request(
+  async queueLtiRosterSync(courseId) {
+    const data = await this.request(
       `/api/courses/${encodeURIComponent(courseId)}/lti/roster-sync`,
       { method: "POST", body: {} },
-    )).sync;
+    );
+    return data.job || {
+      id: null,
+      jobType: "lti.roster_sync",
+      status: "succeeded",
+      result: data.sync,
+    };
   }
 
-  async sendLtiGrade(submissionId) {
-    return (await this.request(
+  async queueLtiGrade(submissionId) {
+    const data = await this.request(
       `/api/submissions/${encodeURIComponent(submissionId)}/lti-grade-passback`,
       { method: "POST", body: {} },
-    )).passback;
+    );
+    return data.job || {
+      id: null,
+      jobType: "lti.grade_passback",
+      status: "succeeded",
+      result: data.passback,
+    };
+  }
+
+  async listJobs(limit = 30) {
+    return (await this.request(`/api/jobs?limit=${encodeURIComponent(limit)}`)).jobs;
+  }
+
+  async getJob(jobId) {
+    return (await this.request(`/api/jobs/${encodeURIComponent(jobId)}`)).job;
+  }
+
+  async waitForJob(job, { timeoutMs = 90000, intervalMs = 500 } = {}) {
+    if (!job?.id || ["succeeded", "failed"].includes(job.status)) return job;
+    const startedAt = Date.now();
+    let current = job;
+    while (!["succeeded", "failed"].includes(current.status)) {
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new EducationApiError("백그라운드 작업 대기 시간이 초과되었습니다.", {
+          code: "job_timeout",
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      current = await this.getJob(job.id);
+    }
+    if (current.status === "failed") {
+      throw new EducationApiError(
+        current.error?.message || "백그라운드 작업이 실패했습니다.",
+        { code: current.error?.code || "job_failed" },
+      );
+    }
+    return current;
   }
 
   async joinCourse(joinCode) {

@@ -33,10 +33,18 @@ const queue = [
     service: { connected: true, nrps: { available: true } },
   }),
   response(200, {
-    sync: { received: 12, enrolled: 12 },
+    job: {
+      id: "job_roster",
+      status: "succeeded",
+      result: { received: 12, enrolled: 12 },
+    },
   }),
   response(200, {
-    passback: { status: "sent", score: 94 },
+    job: {
+      id: "job_grade",
+      status: "succeeded",
+      result: { status: "sent", score: 94 },
+    },
   }),
   response(403, {
     error: { code: "forbidden", message: "Denied" },
@@ -59,8 +67,10 @@ await api.createInvitation({
 });
 await api.updateIdentityProvider("provider_1", { enabled: false });
 await api.getLtiCourseService("course_1");
-await api.syncLtiRoster("course_1");
-await api.sendLtiGrade("submission_1");
+const rosterJob = await api.queueLtiRosterSync("course_1");
+const gradeJob = await api.queueLtiGrade("submission_1");
+assert.equal((await api.waitForJob(rosterJob)).result.received, 12);
+assert.equal((await api.waitForJob(gradeJob)).result.score, 94);
 assert.equal(requests[1].options.headers["X-CSRF-Token"], undefined);
 assert.equal(requests[2].options.headers["X-CSRF-Token"], "csrf-token");
 assert.equal(requests[4].options.headers["X-CSRF-Token"], "csrf-token");

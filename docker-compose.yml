@@ -13,18 +13,61 @@ services:
     volumes:
       - neural-blocks-postgres:/var/lib/postgresql/data
 
-  app:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - neural-blocks-redis:/data
+
+  migrate:
     build: .
+    command: ["python", "migrate.py"]
     depends_on:
       db:
         condition: service_healthy
     environment:
+      NBL_DATABASE_URL: postgresql://neural_blocks:local-development-only@db:5432/neural_blocks
+
+  app:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
       NBL_BASE_URL: http://127.0.0.1:8770
       NBL_DATABASE_URL: postgresql://neural_blocks:local-development-only@db:5432/neural_blocks
+      NBL_REDIS_URL: redis://redis:6379/0
+      NBL_JOB_MODE: redis
+      # Local Compose only. Replace this key in every deployed environment.
+      NBL_JOB_PAYLOAD_KEY: PikWPHj5ZR-EpgcLSK-Ib1mW2JsNSRUypCd7Kj7mBdw=
       NBL_SECURE_COOKIES: "0"
       NBL_EXPOSE_DEV_TOKENS: "1"
     ports:
       - "8770:8080"
 
+  worker:
+    build: .
+    command: ["python", "job_worker.py"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      NBL_BASE_URL: http://127.0.0.1:8770
+      NBL_DATABASE_URL: postgresql://neural_blocks:local-development-only@db:5432/neural_blocks
+      NBL_REDIS_URL: redis://redis:6379/0
+      NBL_JOB_MODE: redis
+      # Must match the app key so workers can decrypt queued payloads.
+      NBL_JOB_PAYLOAD_KEY: PikWPHj5ZR-EpgcLSK-Ib1mW2JsNSRUypCd7Kj7mBdw=
+
 volumes:
   neural-blocks-postgres:
+  neural-blocks-redis:

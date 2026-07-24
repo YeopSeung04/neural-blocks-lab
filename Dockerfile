@@ -15,4 +15,4 @@ COPY . .
 COPY --from=frontend-dependencies /build/node_modules ./node_modules
 
 EXPOSE 8080
-CMD ["python", "server.py", "--bind", "0.0.0.0", "--port", "8080"]
+CMD ["python", "run_server.py", "--bind", "0.0.0.0", "--port", "8080"]

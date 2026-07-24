@@ -2,12 +2,12 @@
 import math
 import unittest
 
-import server
+from system_metrics import collect_metrics
 
 
 class SystemMetricsTest(unittest.TestCase):
     def test_metrics_shape(self):
-        metrics = server.collect_metrics()
+        metrics = collect_metrics()
         self.assertIn("cpu", metrics)
         self.assertIn("memory", metrics)
         self.assertIn("gpu", metrics)

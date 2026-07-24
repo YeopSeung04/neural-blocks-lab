@@ -346,6 +346,28 @@ class NeuralBlocksBackend:
                     sent_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS background_jobs (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+                    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    job_type TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(
+                        status IN ('queued', 'running', 'succeeded', 'failed')
+                    ),
+                    dedupe_key TEXT,
+                    payload_text TEXT NOT NULL,
+                    payload_encrypted INTEGER NOT NULL DEFAULT 0,
+                    result_json TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_courses_tenant ON courses(tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_assignments_course ON assignments(tenant_id, course_id);
@@ -357,6 +379,9 @@ class NeuralBlocksBackend:
                 CREATE INDEX IF NOT EXISTS idx_identity_providers_tenant ON identity_providers(tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_lti_memberships_user ON lti_memberships(user_id);
                 CREATE INDEX IF NOT EXISTS idx_lti_passbacks_submission ON lti_grade_passbacks(submission_id, sent_at);
+                CREATE INDEX IF NOT EXISTS idx_background_jobs_tenant ON background_jobs(tenant_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_background_jobs_dedupe ON background_jobs(dedupe_key, status);
                 """
             )
         self.database.add_column_if_missing("users", "email_verified_at", "TEXT")
@@ -719,6 +744,46 @@ class NeuralBlocksBackend:
                 },
                 "csrfToken": row["csrf_token"],
             }
+
+    def auth_for_user(self, user_id, request_context=None):
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT
+                    u.id AS user_id, u.email, u.display_name, u.role, u.tenant_id,
+                    u.email_verified_at, u.auth_provider,
+                    t.name AS tenant_name, t.slug AS tenant_slug,
+                    t.join_code AS tenant_join_code
+                FROM users u
+                JOIN tenants t ON t.id = u.tenant_id
+                WHERE u.id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not row:
+                raise ApiError(404, "Job user was not found", "not_found")
+            auth = {
+                "user": {
+                    "id": row["user_id"],
+                    "email": row["email"],
+                    "displayName": row["display_name"],
+                    "role": row["role"],
+                    "tenantId": row["tenant_id"],
+                    "emailVerified": bool(row["email_verified_at"]),
+                    "authProvider": row["auth_provider"],
+                },
+                "tenant": {
+                    "id": row["tenant_id"],
+                    "name": row["tenant_name"],
+                    "slug": row["tenant_slug"],
+                    "joinCode": row["tenant_join_code"]
+                    if row["role"] in ("admin", "professor")
+                    else None,
+                },
+            }
+            if request_context:
+                auth["_request"] = request_context
+            return auth
 
     def logout(self, token):
         if not token:

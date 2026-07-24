@@ -106,6 +106,7 @@ export function mountEducationWorkspace({
     invitationsPanel: document.getElementById("educationInvitationsPanel"),
     providersPanel: document.getElementById("educationProvidersPanel"),
     ltiServicesPanel: document.getElementById("educationLtiServicesPanel"),
+    jobsPanel: document.getElementById("educationJobsPanel"),
     auditPanel: document.getElementById("educationAuditPanel"),
     courseForm: document.getElementById("courseForm"),
     courseName: document.getElementById("courseName"),
@@ -163,6 +164,7 @@ export function mountEducationWorkspace({
     providerList: document.getElementById("educationProvidersList"),
     ltiServices: document.getElementById("educationLtiServices"),
     ltiServiceBadge: document.getElementById("ltiServiceBadge"),
+    jobList: document.getElementById("educationJobsList"),
     auditList: document.getElementById("educationAuditList"),
     assignmentCount: document.getElementById("assignmentCount"),
     projectCount: document.getElementById("projectCount"),
@@ -170,6 +172,7 @@ export function mountEducationWorkspace({
     memberCount: document.getElementById("memberCount"),
     invitationCount: document.getElementById("invitationCount"),
     providerCount: document.getElementById("providerCount"),
+    jobCount: document.getElementById("jobCount"),
     auditCount: document.getElementById("auditCount"),
   };
 
@@ -183,6 +186,7 @@ export function mountEducationWorkspace({
     invitations: [],
     providers: [],
     ltiService: null,
+    jobs: [],
     auditEvents: [],
     activeProjectId: null,
   };
@@ -614,6 +618,44 @@ export function mountEducationWorkspace({
     elements.ltiServices.append(item);
   }
 
+  function renderJobs() {
+    elements.jobList.replaceChildren();
+    elements.jobCount.textContent = String(state.jobs.length);
+    if (!state.jobs.length) {
+      elements.jobList.append(createEmpty("실행된 백그라운드 작업이 없습니다."));
+      return;
+    }
+    const typeLabels = {
+      "lti.roster_sync": "LMS 명단 동기화",
+      "lti.grade_passback": "LMS 성적 전송",
+      "email.send": "이메일 발송",
+    };
+    const statusLabels = {
+      queued: "대기",
+      running: "실행 중",
+      succeeded: "완료",
+      failed: "실패",
+    };
+    for (const job of state.jobs) {
+      const item = document.createElement("article");
+      item.className = `education-list-item job ${job.status}`;
+      const title = document.createElement("strong");
+      title.textContent = typeLabels[job.jobType] || job.jobType;
+      const description = document.createElement("p");
+      description.textContent = job.error?.message
+        || `시도 ${job.attempt}/${job.maxAttempts}`;
+      item.append(
+        title,
+        description,
+        createMeta([
+          statusLabels[job.status] || job.status,
+          formatDate(job.finishedAt || job.updatedAt),
+        ]),
+      );
+      elements.jobList.append(item);
+    }
+  }
+
   function renderAuditEvents() {
     elements.auditList.replaceChildren();
     elements.auditCount.textContent = String(state.auditEvents.length);
@@ -650,6 +692,7 @@ export function mountEducationWorkspace({
     elements.invitationsPanel.hidden = !isAdmin();
     elements.providersPanel.hidden = !isAdmin();
     elements.ltiServicesPanel.hidden = !isInstructor();
+    elements.jobsPanel.hidden = !isInstructor();
     elements.auditPanel.hidden = !isAdmin();
     elements.courseCodePanel.hidden = !course?.joinCode;
     elements.courseJoinCodeDisplay.textContent = course?.joinCode || "-";
@@ -661,6 +704,7 @@ export function mountEducationWorkspace({
     renderInvitations();
     renderProviders();
     renderLtiServices();
+    renderJobs();
     renderAuditEvents();
   }
 
@@ -696,20 +740,21 @@ export function mountEducationWorkspace({
   }
 
   async function refreshAdminData() {
-    if (!isAdmin()) {
+    if (isAdmin()) {
+      const [invitations, providers, auditEvents] = await Promise.all([
+        api.listInvitations(),
+        api.listIdentityProviders(),
+        api.listAuditEvents(100),
+      ]);
+      state.invitations = invitations;
+      state.providers = providers;
+      state.auditEvents = auditEvents;
+    } else {
       state.invitations = [];
       state.providers = [];
       state.auditEvents = [];
-      return;
     }
-    const [invitations, providers, auditEvents] = await Promise.all([
-      api.listInvitations(),
-      api.listIdentityProviders(),
-      api.listAuditEvents(100),
-    ]);
-    state.invitations = invitations;
-    state.providers = providers;
-    state.auditEvents = auditEvents;
+    state.jobs = isInstructor() ? await api.listJobs(30) : [];
   }
 
   async function refreshCourses(preferredId = null) {
@@ -1050,6 +1095,7 @@ export function mountEducationWorkspace({
       state.invitations = [];
       state.providers = [];
       state.ltiService = null;
+      state.jobs = [];
       state.auditEvents = [];
       state.activeProjectId = null;
       updateIdentity();
@@ -1182,9 +1228,20 @@ export function mountEducationWorkspace({
     if (!button) return;
     try {
       button.disabled = true;
-      setStatus("LMS에서 강좌 명단을 동기화하는 중입니다.");
-      const result = await api.syncLtiRoster(currentCourseId());
+      setStatus("LMS 명단 동기화 작업을 등록하는 중입니다.");
+      const queued = await api.queueLtiRosterSync(currentCourseId());
+      state.jobs = await api.listJobs(30);
+      renderJobs();
+      setStatus(
+        queued.id
+          ? `명단 동기화 작업 ${queued.id} 실행을 기다리는 중입니다.`
+          : "LMS 명단을 동기화하는 중입니다.",
+      );
+      const completed = await api.waitForJob(queued);
+      const result = completed.result;
       await refreshCourseData();
+      state.jobs = await api.listJobs(30);
+      renderJobs();
       setStatus(
         `LMS 명단 ${result.received}명 확인, ${result.enrolled}명 배정, ${result.created}명 계정 생성`,
         "success",
@@ -1310,8 +1367,19 @@ export function mountEducationWorkspace({
     if (button.dataset.action === "lti-grade-passback") {
       try {
         button.disabled = true;
-        setStatus("채점 결과를 LMS로 전송하는 중입니다.");
-        const result = await api.sendLtiGrade(submissionId);
+        setStatus("LMS 성적 전송 작업을 등록하는 중입니다.");
+        const queued = await api.queueLtiGrade(submissionId);
+        state.jobs = await api.listJobs(30);
+        renderJobs();
+        setStatus(
+          queued.id
+            ? `성적 전송 작업 ${queued.id} 실행을 기다리는 중입니다.`
+            : "채점 결과를 LMS로 전송하는 중입니다.",
+        );
+        const completed = await api.waitForJob(queued);
+        const result = completed.result;
+        state.jobs = await api.listJobs(30);
+        renderJobs();
         setStatus(
           `LMS 성적 전송 완료: ${result.score}점 · ${formatDate(result.sentAt)}`,
           "success",

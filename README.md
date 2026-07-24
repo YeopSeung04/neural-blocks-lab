@@ -20,19 +20,26 @@ npm run serve
 http://127.0.0.1:8770
 ```
 
-전체 Python 의존성이 필요한 PostgreSQL·OIDC·LTI 검증 서버는 다음처럼 실행할 수 있습니다.
+`npm run serve`는 FastAPI/Uvicorn ASGI 서버를 실행합니다. 개발 중 자동 재시작이 필요하면 다음 명령을 사용합니다.
 
 ```bash
-.venv/bin/python server.py --bind 127.0.0.1 --port 8770
+.venv/bin/python run_server.py --bind 127.0.0.1 --port 8770 --reload
 ```
 
-### Docker + PostgreSQL
+기존 `ThreadingHTTPServer` 구현은 회귀 검증용으로만 유지합니다.
 
 ```bash
-docker compose up --build
+.venv/bin/python run_server.py --legacy --bind 127.0.0.1 --port 8770
 ```
 
-Compose는 PostgreSQL 16과 애플리케이션을 함께 실행합니다. 운영 환경에서는 `docker-compose.yml`의 개발용 비밀번호를 사용하지 말고 `.env.example`을 기준으로 Secret Manager나 배포 플랫폼의 비밀 환경변수를 연결해야 합니다.
+### Docker + PostgreSQL + Redis
+
+```bash
+docker compose up -d --build
+docker compose logs -f app worker
+```
+
+Compose는 PostgreSQL 16, Redis 7, 일회성 Alembic migration job, FastAPI 애플리케이션, 백그라운드 워커를 함께 실행합니다. 운영 환경에서는 `docker-compose.yml`의 개발용 비밀번호와 payload 암호화 키를 사용하지 말고 `.env.example`을 기준으로 Secret Manager나 배포 플랫폼의 비밀 환경변수를 연결해야 합니다.
 
 ## 현재 기능
 
@@ -92,6 +99,12 @@ Compose는 PostgreSQL 16과 애플리케이션을 함께 실행합니다. 운영
 - LTI AGS LineItem 자동 생성과 교수 채점 결과 역전송
 - LTI service token의 Client Secret Basic·Private Key JWT 인증
 - OIDC/LTI 공급자 편집·활성화·비활성화
+- FastAPI/Uvicorn ASGI API 서버와 선택적 다중 worker 실행
+- Redis 기반 이메일·NRPS·AGS 비동기 작업 큐
+- 작업 상태, 재시도 횟수, 결과와 오류의 PostgreSQL/SQLite 영구 저장
+- 교수 화면의 백그라운드 작업 상태 확인과 완료 대기
+- 민감한 큐 payload 암호화 및 성공 후 본문 제거
+- Alembic 데이터베이스 revision 관리 기반
 
 ## 사용자 데이터
 
@@ -181,6 +194,36 @@ export NBL_SECURE_COOKIES=1
 export NBL_EXPOSE_DEV_TOKENS=0
 ```
 
+스키마를 현재 Alembic revision으로 맞춥니다.
+
+```bash
+.venv/bin/python migrate.py
+```
+
+기존 데이터베이스는 현재 애플리케이션 스키마를 먼저 보강한 뒤 Alembic revision을 적용합니다. 운영 배포에서는 애플리케이션 인스턴스를 교체하기 전에 백업을 생성하고 이 명령을 별도 migration job으로 한 번 실행해야 합니다.
+
+### 비동기 작업
+
+운영에서는 API 프로세스와 Redis worker를 분리합니다.
+
+```bash
+export NBL_JOB_MODE=redis
+export NBL_REDIS_URL='redis://127.0.0.1:6379/0'
+export NBL_JOB_PAYLOAD_KEY='Fernet-compatible-key'
+
+.venv/bin/python run_server.py --bind 0.0.0.0 --port 8080 --workers 2
+.venv/bin/python job_worker.py
+```
+
+키는 다음처럼 생성합니다.
+
+```bash
+.venv/bin/python -c \
+  "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+API는 이메일 발송, LMS 명단 동기화, LMS 성적 전송 요청을 DB에 `queued` 상태로 기록하고 Redis에 전달합니다. 워커는 작업을 `running`, `succeeded`, `failed`로 갱신하며 실패 작업을 설정된 최대 횟수까지 재시도합니다. Redis를 사용하지 않는 로컬 실행은 작업을 같은 프로세스에서 즉시 처리하는 `inline` 모드로 동작합니다.
+
 ### 이메일
 
 ```bash
@@ -214,9 +257,9 @@ Launch redirect URI:   https://서비스주소/api/auth/lti/launch
 
 LTI launch는 서명된 ID Token, nonce, deployment ID, LTI version과 message type을 확인하고 LTI context를 내부 강좌에 매핑합니다. Launch의 NRPS·AGS service claim은 강좌 연결 정보에 저장됩니다.
 
-- 교수 화면의 `LMS 명단 동기화`는 NRPS Membership Container의 모든 페이지를 읽어 교수·학생 계정과 강좌 배정을 갱신합니다.
+- 교수 화면의 `LMS 명단 동기화`는 작업을 큐에 넣고 NRPS Membership Container의 모든 페이지를 읽어 교수·학생 계정과 강좌 배정을 갱신합니다.
 - 비활성 또는 명단에서 사라진 LMS 사용자는 해당 강좌 배정에서 제외됩니다.
-- 채점이 완료된 제출은 `LMS로 성적 전송`으로 AGS LineItem을 생성하거나 기존 LineItem을 재사용한 뒤 `/scores`로 전달합니다.
+- 채점이 완료된 제출은 `LMS로 성적 전송` 작업을 큐에 넣고 AGS LineItem을 생성하거나 기존 LineItem을 재사용한 뒤 `/scores`로 전달합니다.
 - 서비스 토큰은 `client_secret_basic`과 `private_key_jwt`를 지원합니다. 운영 LMS에서는 플랫폼 등록 방식에 맞는 인증 방식을 선택해야 합니다.
 
 Private Key JWT 예시:
@@ -235,13 +278,13 @@ export NBL_LTI_PRIVATE_KEY="$(cat /run/secrets/lti-private-key.pem)"
 
 ### 운영 전 추가 보강
 
-현재 HTTP 서버는 파일럿과 단일 인스턴스 검증용입니다. 대학 서비스 운영 전에는 HTTPS reverse proxy, 관리형 PostgreSQL 백업·복구, 메일 전송 큐, 감사 로그 보존 정책, Secret Manager, 관리자 MFA, LMS별 인증 상호운용 테스트, 재시도 작업 큐, 부하 테스트가 필요합니다.
+현재 백엔드는 파일럿과 제한된 대학 검증을 위한 ASGI/worker 기반입니다. 유료 대학 서비스 운영 전에는 HTTPS ingress, 관리형 PostgreSQL 백업·복구, Redis 고가용성, Secret Manager, SMTP 공급자, 중앙 로그·메트릭·알림, 관리자 MFA, 세션 강제 종료, 감사 로그 보존 정책, tenant 침투 테스트, LMS별 인증 상호운용 테스트, CI/CD와 부하 테스트가 필요합니다.
 
 사용자가 업로드한 CSV와 이미지 원본은 실험 Snapshot에 포함하지 않습니다. Snapshot에는 모델 구조, 학습 설정, 데이터 요약과 지표만 저장되며 원본 데이터는 복원 시 다시 선택해야 합니다.
 
 ## 디바이스 성능 측정
 
-`server.py`가 OS 값과 브라우저 값을 결합합니다.
+FastAPI 서버가 OS 값과 브라우저 값을 결합합니다.
 
 - macOS: `top`, `IOAccelerator`
 - NVIDIA GPU: `nvidia-smi`
@@ -332,6 +375,12 @@ npm run test:all
 `backend_test.py`는 계정 생성과 로그인, 두 대학 tenant 격리, 학생의 대학·강좌 가입, 프로젝트 버전, 제출 자동 검사, NRPS 명단 반영, AGS 성적 전송 계획과 공급자 업데이트를 검증합니다.
 
 `server_api_test.py`는 실제 HTTP 서버에서 HttpOnly·SameSite 세션 쿠키, CSRF 차단, 공급자 수정, LTI 강좌 연결 조회, 모의 LMS를 사용한 NRPS 동기화·AGS 성적 전송과 인증 세션 종료를 검증합니다.
+
+`asgi_test.py`는 FastAPI 포트의 인증·정적 파일 보호·상태 응답과 비동기 NRPS·AGS 흐름을 검증합니다.
+
+`job_queue_test.py`는 암호화된 작업 payload, 성공 후 본문 제거, tenant 범위 조회, 재시도와 최종 실패 상태를 검증합니다.
+
+`migration_test.py`는 빈 SQLite 데이터베이스의 스키마 초기화와 Alembic revision 적용을 검증합니다.
 
 `federation_test.py`는 OIDC/LTI authorization URL, LTI claim, RSA 서명 ID Token, nonce, Private Key JWT 토큰 인증, NRPS 페이지네이션, AGS LineItem·Score 요청을 확인합니다. PyJWT crypto 의존성이 없으면 서명 검증 테스트만 건너뜁니다.
 

@@ -501,6 +501,22 @@ output {
   border-left-color: var(--green);
 }
 
+.education-list-item.job {
+  border-left-color: var(--blue);
+}
+
+.education-list-item.job.succeeded {
+  border-left-color: var(--green);
+}
+
+.education-list-item.job.failed {
+  border-left-color: var(--red);
+}
+
+.education-list-item.job.running {
+  border-left-color: var(--yellow);
+}
+
 .education-list-item.audit {
   border-left-color: var(--border-strong);
 }
